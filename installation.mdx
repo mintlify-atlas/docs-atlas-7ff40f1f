@@ -1,0 +1,181 @@
+---
+title: "Install QUIMERIA-HYPERION: Python, Rust, and extras"
+description: "Set up Python 3.10+, install core and optional packages, configure SMK_DIR, and optionally build the Rust hyperion execution engine with cargo."
+---
+
+QUIMERIA-HYPERION is a Python/FastAPI application with an optional Rust subproject (`hyperion/`) for high-performance execution. The Python backend is the active production system and runs fully without the Rust crate. This page covers the complete installation, from Python version requirements through optional GPU packages to the Rust build.
+
+## Prerequisites
+
+| Requirement | Minimum | Recommended |
+|---|---|---|
+| Python | 3.10 | 3.12 |
+| pip | Any current | Latest |
+| Node.js | — | 18+ (frontend dev only) |
+| Rust / Cargo | — | Latest stable (hyperion/ only) |
+
+## Install core dependencies
+
+Clone the repository and install `requirements.txt`. This installs all packages needed to run the full SMK pipeline.
+
+```bash
+git clone https://github.com/your-repo/QUIMERIA-HYPERION.git
+cd QUIMERIA-HYPERION
+pip install -r requirements.txt
+```
+
+Core packages installed:
+
+- `fastapi>=0.104` + `uvicorn[standard]>=0.24` — API server and ASGI runner
+- `numpy>=1.24`, `pandas>=2.0`, `scipy>=1.10` — numerical foundation
+- `scikit-learn>=1.3` — ML utilities
+- `statsmodels>=0.14` — statistical models (shim available if import fails)
+- `ccxt>=4.0` — Bitget and exchange connectivity
+- `python-multipart` — file upload support for CSV endpoints
+
+## Optional dependencies
+
+These packages unlock specific subsystems. The kernel loads each via a `try_load()` wrapper and falls back to numpy stubs when they are absent — the server never crashes on a missing optional import.
+
+| Package | Subsystem | Install command |
+|---|---|---|
+| `jax`, `jaxlib` | Mandra kernels, Lambda Fusion (GPU acceleration) | `pip install jax jaxlib` |
+| `faiss-cpu` | SMART-EXE pattern memory (FAISS vector search) | `pip install faiss-cpu` |
+| `ripser>=0.6` | Topological Fracture Detector (persistent homology) | `pip install ripser` |
+
+```bash
+# Install all optional packages at once
+pip install jax jaxlib faiss-cpu ripser
+```
+
+<Note>
+  When JAX is not installed, the system logs a warning and substitutes a numpy shim (`backend/jax_shim.py`). Mandra kernel computations run correctly but are slower. The warning `JAX not installed — using numpy shim` is expected in this mode.
+</Note>
+
+<Warning>
+  `ripser` requires a C compiler and may fail on minimal Linux images. If the topological fracture detector is not critical for your use case, omit it. The rest of the pipeline is unaffected.
+</Warning>
+
+## Platform launchers
+
+The launcher scripts set `SMK_DIR`, `PYTHONPATH`, create required directories, verify modules, and start uvicorn. Use them for the fastest path to a running system.
+
+<CodeGroup>
+  ```bash Linux / macOS (scripts/start.sh)
+  chmod +x scripts/start.sh
+
+  # Start the full system (backend + optional grid bot)
+  ./scripts/start.sh
+
+  # Start backend only
+  ./scripts/start.sh --backend
+
+  # Start on a custom port
+  ./scripts/start.sh --port 8080
+
+  # Check service status
+  ./scripts/start.sh --status
+
+  # Stop all services
+  ./scripts/start.sh --stop
+  ```
+
+  ```cmd Windows (scripts/start.bat)
+  :: Start in gridless mode — backend only on port 8000
+  scripts\start.bat
+  ```
+</CodeGroup>
+
+The Linux launcher also accepts `--host HOST` to bind to a specific interface and `--restart` to stop then restart all services cleanly.
+
+## SMK_DIR environment variable
+
+`SMK_DIR` points to the project root so the kernel can resolve cross-package imports at runtime. Without it, `smk_pipeline._find_smk_root()` falls back to walking up from `backend/`, which may fail in some environments.
+
+```bash
+# Temporary (current terminal session)
+export SMK_DIR=/path/to/QUIMERIA-HYPERION
+export PYTHONPATH="$SMK_DIR:$SMK_DIR/backend:$PYTHONPATH"
+
+# Permanent (add to ~/.bashrc or ~/.zshrc)
+echo 'export SMK_DIR=/path/to/QUIMERIA-HYPERION' >> ~/.bashrc
+echo 'export PYTHONPATH="$SMK_DIR:$SMK_DIR/backend:$PYTHONPATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+On Windows, set it persistently through **System Properties > Environment Variables** or in your terminal profile.
+
+## Verify the installation
+
+After setting `SMK_DIR`, confirm the core modules load correctly:
+
+```bash
+cd $SMK_DIR
+python -c "from backend.smk_pipeline import SMKPipeline; print('Pipeline OK')"
+python -c "from core.kernel.SovereignMarketKernel import SovereignMarketKernel; print('Kernel OK')"
+python -c "from risk.mandra_kernels import MandraKernel; print('Mandra OK')"
+```
+
+You can also start the backend and check the status endpoint:
+
+```bash
+cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload &
+curl http://localhost:8000/api/status
+```
+
+## Rust hyperion subproject
+
+The `hyperion/` directory contains a Rust crate compiled as a `pyo3 cdylib`. It implements the high-performance SentinelEngine and is accessed from Python via `backend/hyperion_client.py`. The Rust crate is not yet wired into the main pipeline — the Python backend operates independently.
+
+```bash
+cd hyperion
+cargo build
+cargo test
+cargo run    # Demo: processes a synthetic Adelic Burst
+```
+
+<Warning>
+  `hyperion/Cargo.toml` currently contains an unresolved merge conflict in the `redis` dependency section. Resolve the conflict markers before running `cargo build`.
+</Warning>
+
+The launcher script (`scripts/start.sh`) handles the Rust build automatically using `maturin` if `cargo` is detected. It checks a build hash against `Cargo.lock` to skip unnecessary rebuilds:
+
+```bash
+# Manual build via maturin (used by the launcher internally)
+pip install maturin
+cd hyperion
+maturin build --release --out dist/
+pip install dist/quimeria_hyperion-*.whl
+```
+
+After installing the wheel, verify the integration point:
+
+```bash
+python -c "from quimeria_hyperion import SentinelEngine; print('Rust SentinelEngine: OK')"
+```
+
+If the wheel is not installed, `backend/hyperion_client.py` falls back to Python mock mode automatically.
+
+## Run tests
+
+```bash
+# Orderbook unit tests
+python -m pytest tests/ -v
+
+# AEGIS bridge verification
+cd backend
+python test_bridge.py
+```
+
+## Directory structure created at startup
+
+The launcher creates these directories on first run if they do not exist:
+
+```
+QUIMERIA-HYPERION/
+├── logs/       # Five rotating log streams (10 MB each, 5 backups)
+├── data/       # Persistent data storage
+├── models/     # Saved model weights
+└── .pids/      # PID files for background services
+```

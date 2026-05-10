@@ -1,0 +1,110 @@
+---
+title: "SMK architecture: layers, rings, and execution flow"
+description: "A complete guide to the Sovereign Market Kernel's multi-layer intelligence stack, from Bayesian orchestration through Ring 0 veto authority to the AEGIS execution bridge."
+---
+
+The Sovereign Market Kernel (SMK) is organized as a hierarchical intelligence stack that processes each price bar through a sequence of analytical layers before any trade execution decision is made. Rather than treating signals as independent indicators, the SMK fuses structural market context, spectral forensics, and Bayesian regime state into a single gated decision — where any layer has the authority to halt execution outright.
+
+## Full system diagram
+
+The following diagram shows the complete SMK stack, from the top-level Bayesian orchestration ring down to the AEGIS execution bridge.
+
+```text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SOVEREIGN MARKET KERNEL                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RING -1: BAYESIAN ORCHESTRATION                                            │
+│  ├── HMM Regime Tracker (7ZERO)                                            │
+│  ├── GMOS Governor (Hamiltonian Energy)                                     │
+│  └── OBNFE Kill Switch                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 1: IPDA STRUCTURAL COMPILER                                          │
+│  ├── Dealing Range (20/40/60-day)                                          │
+│  ├── Premium/Discount Zone                                                  │
+│  ├── Equilibrium Cross                                                      │
+│  └── AMD State Machine (Accumulate→Manipulate→Distribute→Retrace)          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 2: MEMORY & IMBALANCE                                                │
+│  ├── FVG Detector (Fair Value Gaps)                                        │
+│  ├── Order Block Detector                                                   │
+│  └── Volume Profile Engine (TAP Density)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 3: λ SENSORS (The "Senses")                                         │
+│  ├── λ₁ Volatility Decay (Entrapment)                                      │
+│  ├── λ₂ Killzone Timing                                                    │
+│  ├── λ₃ Harmonic Inversion (FFT Phase)                                     │
+│  ├── λ₄ Manipulation Phase (Judas Swing)                                   │
+│  ├── λ₅ Displacement (Order Flow Burst)                                    │
+│  ├── λ₆ Macro Bias                                                         │
+│  ├── λ₇ Macro Causality (DXY/SPX)                                         │
+│  └── λ₈ Light-Cone Violation (Information Leakage)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 4: FORENSICS & PLUGINS                                               │
+│  ├── Market Rhythm (MIR Spectrogram)                                       │
+│  ├── Market Heuristic (AV-Style Scoring)                                   │
+│  ├── Market Vision (SIFT Keypoints)                                        │
+│  ├── Market Seismology (P/S/Surface Waves)                                 │
+│  ├── File Carving Engine (S/R Clustering)                                  │
+│  └── Signature Scan Engine (Pattern DB)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RING 0: FUSION & VETO AUTHORITY                                           │
+│  ├── Lambda Fusion Engine (OBNFE)                                          │
+│  ├── Mandra Gate (ΔE ≥ 2 Information Constraint)                           │
+│  ├── KL Divergence (Regime Fracture)                                       │
+│  └── Topological Fracture (Persistent Homology)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  EXECUTION LAYER                                                            │
+│  ├── AEGIS Bridge (StopLossManager + SchurRouter)                          │
+│  ├── Smart Intelligence (FAISS Memory + GRU)                               │
+│  └── Auto-Profit Manager (2% adjustable)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Processing flow, ring by ring
+
+<Steps>
+  <Step title="Ring -1: Bayesian orchestration">
+    Before any structural analysis begins, the **HMM Regime Tracker** classifies the current market state (0 = SIDEWAYS, 1 = STABLE, 2 = STABLE-trending). The **GMOS Governor** measures market exhaustion via Hamiltonian energy, and the **OBNFE Kill Switch** halts the entire pipeline if sensor reliability drops below acceptable posterior thresholds. Ring -1 is the "will" of the system — it decides whether the market is fit to trade at all.
+  </Step>
+
+  <Step title="Layer 1: IPDA structural compiler">
+    The IPDA Structural Compiler establishes the market's **context**: which dealing range is active (20-, 40-, or 60-day), whether price is in a Premium or Discount zone relative to equilibrium, and which phase of the AMD (Accumulate → Manipulate → Distribute → Retrace) cycle is in progress. Detectors run in `core/detectors/`: `DealingRangeDetector`, `BiasDetector`, `IPDACompiler`, `EquilibriumCrossDetector`, `SessionDetector`, and `SwingDetector`.
+  </Step>
+
+  <Step title="Layer 2: Memory and imbalance">
+    Layer 2 captures the market's **memory**: unmitigated Fair Value Gaps, institutional Order Blocks, and Volume Profile density (TAP zones). These supply-demand imprints inform lambda sensor scoring and execution targeting. Modules live in `liquidity/`: `FVGDetectorEngine`, `OrderBlockDetector`, and `VolumeProfileMemoryEngine`.
+  </Step>
+
+  <Step title="Layer 3: λ sensors (the senses)">
+    Eight lambda sensors fire independently per bar and produce probability scores. λ₁–λ₆ cover volatility decay, killzone timing, harmonic inversion (FFT), manipulation phase, displacement, and macro bias. λ₇ gates on DXY/SPX correlation; λ₈ checks for light-cone violations (information leakage). Any sensor may issue a **hard veto**, which propagates forward to Ring 0.
+  </Step>
+
+  <Step title="Layer 4: Forensics and plugins">
+    Six auto-discovered forensic plugins run after the core pipeline and append additional sensor rows to the `sensors[]` array in the step result. These cover music-information-retrieval rhythm analysis, heuristic stop-hunt scoring, SIFT-based visual pattern recognition, seismic wave classification, support/resistance clustering, and a 14-pattern signature database.
+  </Step>
+
+  <Step title="Ring 0: Fusion and veto authority">
+    The **Lambda Fusion Engine** combines all λ scores into a single fused probability `p_fused`. The **Mandra Gate** checks information energy gain (ΔE ≥ 0.02). **KL Divergence** and **Topological Fracture** detectors watch for regime breaks. If any of the six hard-stop conditions is met, `r['veto']['trade_allowed']` is set to `false` and the AEGIS bridge will not execute.
+  </Step>
+
+  <Step title="Execution layer">
+    The **AEGIS Bridge** receives the fully gated result dict and only acts when `r['veto']['decision'] == 'Proceed'`. It passes the signal through `StopLossManager` and `SchurRouter` for venue-optimized order placement. The **SMART-EXE** module (FAISS memory + GRU) provides historical pattern recall for position sizing. The **Auto-Profit Manager** defaults to a 2% target, configurable via environment variable.
+  </Step>
+</Steps>
+
+## Explore each subsystem
+
+<CardGroup cols={2}>
+  <Card title="Signal pipeline" icon="wave-sine" href="/architecture/signal-pipeline">
+    How `SMKPipeline.step()` processes each bar: data flow, result dict schema, JSON safety, and the fail-safe import pattern.
+  </Card>
+  <Card title="Ring system" icon="shield-halved" href="/architecture/ring-system">
+    Deep dive into Ring -1 (HMM/GMOS) and Ring 0 (Lambda Fusion, Mandra Gate, KL Divergence, Topological Fracture) with all six veto conditions.
+  </Card>
+  <Card title="Plugin system" icon="plug" href="/architecture/plugin-system">
+    The `SMKPlugin` base class, `PLUGIN_REGISTRY`, auto-discovery, the six built-in forensic plugins, and how to extend the system.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/plugin-contract">
+    Full plugin development contract, endpoint reference, and WebSocket streaming protocol.
+  </Card>
+</CardGroup>

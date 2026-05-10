@@ -1,0 +1,173 @@
+---
+title: "Ring -1 to Ring 0: the SMK veto authority system"
+description: "How the SMK's two authority rings — Bayesian orchestration in Ring -1 and Lambda Fusion veto in Ring 0 — gate every trade through six hard-stop conditions."
+---
+
+The SMK imposes two concentric rings of authority around all trade execution. Ring -1 sits above the analytical layers and decides whether the market regime is fit to trade at all. Ring 0 sits below the layers and fuses every sensor signal into a final go/no-go decision. Both rings have unconditional veto power: if either ring objects, `r['veto']['trade_allowed']` is set to `false` and the AEGIS bridge takes no action.
+
+## Ring -1: Bayesian orchestration
+
+Ring -1 is implemented in `core/kernel/gmos_hmm_engine.py` and surfaces in the pipeline as the `gmos` key of the step result. It runs three concurrent sub-systems:
+
+### HMM regime tracker (7ZERO)
+
+The Hidden Markov Model tracks market **regime persistence**. It classifies each bar into one of three states:
+
+| State | Value | Meaning |
+|-------|-------|---------|
+| SIDEWAYS | `0` | Choppy, range-bound — no trending structure detected |
+| STABLE | `1` | Stable regime — trending conditions confirmed |
+| STABLE | `2` | Stable-trending — high-persistence momentum confirmed |
+
+<Warning>
+When `HMM Regime = 0 (SIDEWAYS)`, the CLAUDE.md breakage-prevention rule requires forcing Accumulation logic and monitoring for λ₁ exhaustion before attempting any directional trade. Never increase Kelly position sizing unless regime is STABLE (1 or 2).
+</Warning>
+
+The HMM persistence prior ranges from 0.6 to 0.95, controlling how "sticky" regime transitions are. A tighter prior prevents the model from flip-flopping on volatile bars.
+
+### GMOS Governor (Hamiltonian energy)
+
+The **GMOS (General Market Orchestration System) Governor** measures market exhaustion using a physics-inspired Hamiltonian energy metric `H_t`. It accepts six sensor probabilities per bar and updates a Bayesian posterior over execution confidence. The telemetry fields exposed in `r['gmos']` are:
+
+```python
+r['gmos'] == {
+    "execute":       True,      # False if GMOS vetoes execution
+    "action":        "EXECUTE", # "EXECUTE" | "HOLD" | "VETO"
+    "p_fused":       0.73,      # GMOS-internal fused probability
+    "coherence":     0.88,      # Sensor coherence score (0–1)
+    "hamiltonian":   0.04,      # Kinetic exhaustion measure
+    "regime_stable": True,      # Whether HMM+topology agree
+    "drawdown":      0.01,      # Normalized drawdown pressure
+    "phase":         1,         # AMD phase integer (0–3)
+    "available":     True,      # False if JAX is not installed
+}
+```
+
+<Note>
+`available: false` indicates the GMOS governor is running in numpy fallback mode because JAX is not installed. The pipeline continues operating — it passes `p_fused` from the Lambda Fusion Engine through instead of computing the Hamiltonian energy independently.
+</Note>
+
+### OBNFE kill switch
+
+The **OBNFE (Optimal Bayesian Non-parametric Fusion Engine) Kill Switch** monitors whether the combined posterior probability of a market reversal exceeds a hard threshold. If sensor reliability drops or the posterior for regime stability falls below the configured prior, OBNFE halts execution before any lambda sensor runs. This prevents the pipeline from acting on structurally invalid data.
+
+---
+
+## Ring 0: fusion and veto authority
+
+Ring 0 is implemented across `core/kernel/lambda_fusion_engine.py`, `risk/mandra_kernels.py`, `detectors/kl_divergence_detector.py`, and `detectors/topological_fracture_detector.py`. It runs after all lambda sensors have fired and combines their outputs into the final execution decision.
+
+### Lambda Fusion Engine
+
+The Lambda Fusion Engine collects all eight λ signals — each with a score, confidence, and veto flag — and computes a single fused probability `p_fused`:
+
+```python
+signals = {
+    "λ1_vol_decay":    {"score": 0.9, "confidence": 0.85, "veto": False},
+    "λ2_session":      {"score": 0.7, "confidence": 0.80, "veto": False},
+    "λ3_harmonic":     {"score": -1.0,"confidence": 0.75, "veto": True },  # Liar State
+    "λ4_manipulation": {"score": 0.8, "confidence": 0.70, "veto": False},
+    "λ5_displacement": {"score": 1.0, "confidence": 0.85, "veto": False},
+    "λ6_bias":         {"score": 1.0, "confidence": 0.88, "veto": False},
+    "λ7_macro":        {"score": 0.6, "confidence": 0.70, "veto": False},
+    "λ8_light_cone":   {"score": 0.5, "confidence": 0.80, "veto": False},
+}
+```
+
+The result is stored in `r['fusion']`:
+
+```python
+r['fusion'] == {
+    "p_fused":       0.68,        # Combined probability (–1 to +1)
+    "confidence":    0.82,        # Weighted fusion confidence
+    "veto_active":   False,       # True if any λ issued a hard veto
+    "active_lambdas": ["λ1", "λ5", "λ6"],
+    "regime":        "STABLE",
+    "status":        "FUSION_OK",
+}
+```
+
+### Mandra Gate (information energy constraint)
+
+The Mandra Gate applies an information-theoretic check: trade execution is only allowed if the **information energy gain** ΔE is positive and exceeds the minimum threshold of 0.02. Formally, `ΔE = E_current − E_previous`, where energy is derived from `p_fused² × confidence`.
+
+```python
+r['mandra'] == {
+    "open":          True,    # True = gate is open, trade allowed
+    "delta_e":       0.034,   # Information energy gain this bar
+    "size":          0.02,    # Clamped position size
+    "regime_stable": True,
+    "status":        "GATE_OPEN",
+}
+```
+
+<Warning>
+`ERR_MANDRA_ENTROPY` (`delta_e < 0`) means the market is too chaotic to trade. Stop execution immediately and wait for the energy signal to recover. Never override a negative ΔE — the CLAUDE.md breakage-prevention rules prohibit execution without Mandra Gate confirmation.
+</Warning>
+
+### KL Divergence detector
+
+The KL Divergence detector monitors for **regime fractures** — moments when the current price distribution has drifted so far from the calibrated manifold that the model's assumptions no longer hold. It is calibrated on the first 60 bars of a dataset via `kl.calibrate_manifold()`.
+
+A `KL:REGIME_FRACTURE` veto fires when `kl['score'] > 1.3 × threshold` and `kl['stable'] == False`. Error code `ERR_REGIME_FRACTURE` requires manual manifold recalibration.
+
+### Topological Fracture detector
+
+The Topological Fracture detector uses **persistent homology** (via the `ripser` library) to detect H₁ loop formation in the price manifold — a sign that the market structure has broken down into a non-linear, looping topology. A `TOPO:H1_FRACTURE` veto fires when `h1_score > threshold`.
+
+<Warning>
+`HALT_H1_LOOP` errors indicate topological fracture. Wait for manifold compaction (H1 reset) — do not attempt to trade through a fracture event.
+</Warning>
+
+---
+
+## The six Ring 0 veto conditions
+
+All six conditions are evaluated in `_veto()` in `smk_pipeline.py`. If any single condition is met, `trade_allowed` is set to `false`.
+
+<Warning>
+The system will **halt** execution immediately if any of these conditions is triggered. They are checked every bar, in order, with no overrides.
+</Warning>
+
+| Condition | Trigger | Source module |
+|-----------|---------|---------------|
+| `MANDRA:ΔE<0` | Negative information energy gain (`mandra['open'] == False`) | `risk/mandra_kernels.py` |
+| `TOPO:H1_FRACTURE` | Persistent homology loop sum exceeds threshold | `detectors/topological_fracture_detector.py` |
+| `FUSION:LAMBDA_VETO` | Any λ sensor issued a hard veto flag | `core/kernel/lambda_fusion_engine.py` |
+| `L3:LIAR_STATE` | FFT phase inversion exceeds π/2 (`harmonic['inverted'] == True`) | `lambda_sensors/harmonic_trap_detector.py` |
+| `KL:REGIME_FRACTURE` | KL divergence score exceeds 1.3× threshold | `detectors/kl_divergence_detector.py` |
+| `CONF:INSUFFICIENT` | Fusion confidence below 0.2 (`fusion['confidence'] < 0.2`) | `core/kernel/lambda_fusion_engine.py` |
+
+---
+
+## Reading the veto decision
+
+The final veto output lives in `r['veto']` and is checked by the AEGIS bridge before any order action:
+
+```python
+r['veto'] == {
+    "decision":      "Halt",                          # "Proceed" | "Halt" | "Reset"
+    "trade_allowed": False,                            # AEGIS checks this field
+    "reasons": [
+        "TOPO:H1_FRACTURE",
+        "λ₇: DXY correlation veto"
+    ]
+}
+```
+
+`decision` can take three values:
+
+- **`Proceed`** — all Ring 0 conditions passed, AEGIS may execute
+- **`Halt`** — one or more veto conditions triggered, no execution
+- **`Reset`** — the AMD R_MASTER flag is set (retracement reset in progress), AEGIS holds
+
+The AEGIS bridge uses this conditional check:
+
+```python
+if r['veto']['decision'] == 'Proceed':
+    r['execution'] = bridge.evaluate(r, bars)
+else:
+    r['execution'] = self._null_execution(r['veto']['decision'])
+```
+
+All veto decisions are written to `logs/veto.log` (5 rotating backups, 10 MB each) for post-session audit.

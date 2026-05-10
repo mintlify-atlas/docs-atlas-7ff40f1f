@@ -1,0 +1,162 @@
+---
+title: "Connect MetaTrader 5 via the ZeroMQ bridge"
+description: "Wire MT5 Expert Advisors to the QUIMERIA SMK kernel using the MT5Gateway ZeroMQ bridge on ports 5555 and 5556 for tick ingestion and order dispatch."
+---
+
+The MetaTrader 5 integration connects an MT5 Expert Advisor (EA) to the QUIMERIA Sovereign Market Kernel via a ZeroMQ publish/subscribe bridge. Incoming ticks arrive on port 5555 and are fed directly into the kernel order book. Outbound order signals leave on port 5556, tagged with a `QUIMERIA-{signal_id}` identifier so the EA can correlate responses. The bridge is implemented in `integrations/mt5/service.py` and connects to `backend/data/zmq_data_bus.py`.
+
+---
+
+## How the ZeroMQ bridge works
+
+```
+MT5 EA (Expert Advisor)
+  │
+  │  ZMQ PUB  port 5555  (tick stream)
+  ▼
+MT5Gateway
+  ├── kernel.order_book.update(TickData)
+  │
+  │  ZMQ SUB  port 5556  (order dispatch)
+  ▼
+MT5 EA
+  └── ORDER_SEND JSON  {"action":"ORDER_SEND", "id":"QUIMERIA-{signal_id}", ...}
+```
+
+**Port 5555** — SMK subscribes as a ZMQ SUB socket. Each message is a serialized `TickData` object. The gateway deserializes the tick and calls `kernel.order_book.update(TickData)` to update the high-performance limit order book.
+
+**Port 5556** — SMK publishes as a ZMQ PUB socket. When the lambda fusion engine approves a signal and the Mandra Gate passes (ΔE ≥ 0.02), an `ORDER_SEND` JSON message is published tagged `QUIMERIA-{signal_id}`. The MT5 EA subscribes on this port, parses the message, and executes the order.
+
+---
+
+## MT5Gateway class
+
+`MT5Gateway` in `integrations/mt5/service.py` wraps the `MetaTrader5` Python library and handles connection lifecycle, symbol resolution, and order placement with broker-supported fill mode fallback.
+
+```python
+from integrations.mt5.service import MT5Service
+
+mt5 = MT5Service(path=r"C:\Program Files\MetaTrader 5\terminal64.exe")
+
+result = mt5.place_market_order(
+    trade=trade_obj,
+    symbol="EURUSD",
+    side="buy",
+    lot=0.1,
+    sl=1.10200,
+    tp=1.11000,
+    comment="QUIMERIA-sig-001",
+)
+print(result)
+# {"ok": True, "order": 12345678, "price": 1.10512, ...}
+```
+
+### Supported timeframes
+
+```python
+TIMEFRAMES = {
+    "M1":  mt5.TIMEFRAME_M1,
+    "M5":  mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30,
+    "H1":  mt5.TIMEFRAME_H1,
+    "H4":  mt5.TIMEFRAME_H4,
+    "D1":  mt5.TIMEFRAME_D1,
+}
+```
+
+### Terminal path
+
+The default terminal path is `C:\Program Files\MetaTrader 5\terminal64.exe`. Override it by passing `path=` to `MT5Service()` or by setting the environment variable in your `.env` file.
+
+---
+
+## MT5 credential environment variables
+
+The `.env` file supports separate credential sets for TradingView webhook targets and MetaTrader EA scripts. The `MT_*` variables are consumed by the MT5 integration.
+
+```bash
+# MT4/MT5 EA credentials (MEXC)
+MT_API_KEY_MEXC=your_mexc_api_key
+MT_SECRET_KEY_MEXC=your_mexc_secret
+MT_PASSPHRASE_MEXC=             # leave empty for MEXC
+
+# MT4/MT5 EA credentials (Bybit)
+MT_API_KEY_BYBIT=your_bybit_api_key
+MT_SECRET_KEY_BYBIT=your_bybit_secret
+MT_PASSPHRASE_BYBIT=            # leave empty for Bybit
+
+# MT4/MT5 EA credentials (OKX)
+MT_API_KEY_OKX=your_okx_api_key
+MT_SECRET_KEY_OKX=your_okx_secret
+MT_PASSPHRASE_OKX=your_okx_passphrase   # required for OKX
+
+MT_TRADE_MODE=spot   # forex/spot
+```
+
+<Warning>
+  Never commit the `.env` file to version control. OKX requires the passphrase field; leaving it empty will cause authentication failures on order submission.
+</Warning>
+
+---
+
+## The live_eurusd.py entry point
+
+`apps/live_eurusd.py` is the primary entry point for running QUIMERIA-HYPERION in a live MT5 deployment. It initializes the ZeroMQ bridge, connects to the MT5 terminal, and starts the SMK pipeline in live mode.
+
+```bash
+# From the project root
+export SMK_DIR=/path/to/QUIMERIA-HYPERION
+python apps/live_eurusd.py
+```
+
+Or use the launcher script, which sets `SMK_DIR` automatically:
+
+```bash
+./quimeria.sh
+```
+
+The launcher script verifies that `apps/live_eurusd.py` and `backend/main.py` both exist before starting. If either file is missing it exits with a clear error message.
+
+---
+
+## ZMQ data bus
+
+`backend/data/zmq_data_bus.py` is the internal message router between the MT5 bridge and the SMK pipeline. It exposes:
+
+- A ZMQ SUB socket on port 5555 that receives tick messages from the MT5 EA
+- A ZMQ PUB socket on port 5556 that dispatches `ORDER_SEND` JSON to the EA
+- An async event loop compatible with the FastAPI uvicorn server
+
+The data bus is started automatically when `apps/live_eurusd.py` runs. It does not require manual configuration beyond the port numbers.
+
+---
+
+## Integration files reference
+
+| File | Purpose |
+|------|---------|
+| `integrations/mt5/service.py` | `MT5Service` class — connection, order placement, symbol resolution |
+| `integrations/mt5/bridge_client.py` | ZeroMQ bridge client connecting to the data bus |
+| `integrations/mt5/market_broadcast.py` | Broadcasts candle data from MT5 to SMK pipeline |
+| `integrations/mt5/mt5_compat.py` | Compatibility shim for environments without `MetaTrader5` installed |
+| `integrations/mt5/mt5_service_standalone.py` | Standalone version of MT5Service without Django REST dependencies |
+| `integrations/mt5/app.py` | Django REST API views for the MT5 service |
+| `integrations/mt5/mt5cfg.ini` | MT5 terminal configuration |
+| `apps/live_eurusd.py` | Main entry point for live EUR/USD MT5 deployment |
+
+<Note>
+  `mt5_compat.py` provides a stub `MetaTrader5` module so the integration can be imported on Linux machines where the MT5 library is not available. The stub raises a descriptive error if you attempt to call a live MT5 function.
+</Note>
+
+---
+
+## Order tagging
+
+Every order dispatched through the ZeroMQ bridge carries the tag `QUIMERIA-{signal_id}` in the MT5 comment field (mapped to the `comment` parameter of `place_market_order`). This allows the EA to:
+
+1. Match order responses back to specific SMK signals
+2. Filter QUIMERIA-managed positions from manually placed trades
+3. Route partial fills back to the correct `TradePosition` instance
+
+The signal ID is generated by `LambdaFusionEngine` when `r['veto']['trade_allowed']` is `True` and is available in the `r['action_center']` key of the step result dict.

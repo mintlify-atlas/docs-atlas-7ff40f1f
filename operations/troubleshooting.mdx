@@ -1,0 +1,229 @@
+---
+title: "Troubleshoot veto conditions and import errors"
+description: "Diagnose Ring 0 veto conditions, SMK error codes, numpy fallback mode, SMK_DIR failures, and known sensor weaknesses including the λ3 Harmonic Trap Paradox."
+---
+
+Most QUIMERIA-HYPERION issues fall into two categories: veto conditions that block trade execution and import or path errors that degrade the pipeline to numpy fallback mode. This page walks through both, covers all error codes from the Ring 0 decision layer, and documents the known sensor weaknesses you need to account for in live deployments.
+
+---
+
+## Veto decision tree
+
+When `r['veto']['trade_allowed']` is `False`, read `r['veto']['reasons']` to identify which Ring 0 gate triggered the halt, then follow the resolution steps below.
+
+<AccordionGroup>
+  <Accordion title="λ7 Macro Gate veto (FUSION:LAMBDA_VETO)">
+    **Trigger:** The λ7 Macro Causality sensor detected an adverse DXY or lead-asset correlation and issued a hard veto. This fires when the macro environment is in direct opposition to the structural bias.
+
+    **Check first:**
+    1. Verify the DXY/SPX correlation data is current — stale or missing macro data causes false vetoes.
+    2. Confirm the `r['sensors']` entry for `lambda7` and check its raw score. A score below 0.3 alongside a hard veto indicates the correlation threshold is calibrated correctly.
+
+    **Resolution:**
+    - If correlation is legitimate: wait for macro alignment before resuming execution.
+    - If sensor appears miscalibrated: verify input feed for the lead asset is not missing bars. Do not override a λ7 veto during Privileged Mode (central bank intervention windows).
+
+    <Warning>
+      Never override a λ7 Macro Gate veto during scheduled central bank events (FOMC, ECB, BoE announcements). The veto exists precisely for these periods.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Mandra rejects — ERR_MANDRA_ENTROPY (ΔE < 0.02)">
+    **Trigger:** The Mandra Gate computed a ΔE (information energy gain) below the minimum threshold of 0.02. The market is not delivering enough information content to justify a position.
+
+    **Check first:**
+    - Is the market in a Reverse Period (session transition, low-liquidity window)? If yes, this is expected behavior — wait.
+    - Check `r['mandra']['delta_e']` directly. Values near zero but positive indicate borderline entropy; values negative indicate chaotic price action.
+
+    **Resolution:**
+    - For `delta_e` between 0 and 0.02: wait for the next AMD phase transition. The entropy gate typically clears during Manipulation and Distribution phases.
+    - For negative `delta_e` (`ERR_MANDRA_ENTROPY`): stop execution immediately. Do not attempt to force trades — the market is in a chaotic state that the model cannot reliably predict.
+
+    **Threshold:** ΔE_min = 0.02 (adaptive range: 0.005–0.08 depending on volatility regime).
+  </Accordion>
+
+  <Accordion title="λ8 Kill-Switch (light-cone violation)">
+    **Trigger:** The λ8 Light-Cone Violation detector identified statistical evidence of information leakage or front-running. This fires when price movements precede their causal triggers by more than the expected propagation window.
+
+    **Check first:**
+    1. Review recent `events.log` entries for repeated early price moves before macro releases.
+    2. Check `r['sensors']` for `lambda8` score — a score above 0.8 alongside a veto indicates high-confidence detection.
+
+    **Resolution:**
+    - Audit the data feed for latency anomalies or timestamp drift.
+    - If the feed is clean, the issue may be the Adelic Tube radius being too narrow (see Known Weaknesses below). Widen the p-adic radius in `core/adelic/` configuration.
+    - Do not resume trading until the λ8 score drops below the veto threshold for at least 3 consecutive bars.
+  </Accordion>
+
+  <Accordion title="HMM Regime = 0 (SIDEWAYS)">
+    **Trigger:** The 7ZERO HMM tracker classified the current regime as `0` (sideways/ranging). The SMK requires a stable trending (1) or reversal (2) regime before approving signals.
+
+    **Check first:**
+    - Read `r['gmos']['regime']`. A value of `0` means the HMM has not found a dominant state.
+    - Check `r['gmos']['confidence']`. Low confidence (< 0.6) combined with regime 0 means the market genuinely has no directional structure.
+
+    **Resolution:**
+    - Force Accumulation logic: watch for λ1 volatility exhaustion (`V_t / ATR₂₀ < 0.7`) as the signal that the ranging phase is ending.
+    - Monitor `r['amd']['state']` — a transition from `ACCUMULATION` to `MANIPULATION` is the earliest structural signal of regime change.
+    - Do not increase Kelly position sizing while the HMM regime is 0 or the confidence is below 0.6.
+  </Accordion>
+
+  <Accordion title="TOPO:H1_FRACTURE (topological fracture)">
+    **Trigger:** The topological fracture detector found persistent H₁ homology loops exceeding the threshold. This indicates a fractal structural break in the price manifold.
+
+    **Resolution:**
+    - Wait for manifold compaction (H1 reset). This typically resolves within 3–10 bars after the fracture event.
+    - Check `logs/events.log` for the bar index where `TOPO:H1_FRACTURE` was first logged and count bars since then.
+    - This condition requires `ripser` to be installed. If `ripser` is missing, the topological detector falls back to a numpy stub and will never trigger `HALT_H1_LOOP`.
+  </Accordion>
+
+  <Accordion title="KL:REGIME_FRACTURE (KL divergence)">
+    **Trigger:** KL divergence between the current and reference regime distribution exceeded 1.3× the threshold, indicating a statistically significant regime shift.
+
+    **Resolution:**
+    - This condition requires manual manifold recalibration. The reference distribution used for KL comparison may be stale if the instrument has undergone a structural change (e.g., ETF inclusion, macro regime shift).
+    - After recalibration, the `ERR_REGIME_FRACTURE` error clears automatically on the next bar.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Error codes reference
+
+| Code | Root cause | Resolution |
+|------|-----------|------------|
+| `ERR_REGIME_FRACTURE` | KL divergence > 2× threshold | Manual manifold recalibration |
+| `VETO_LIAR_STATE` | λ3 phase inversion: `φ_diff > π/2` | Wait for `φ_diff < π/2` (typically 2–5 bars) |
+| `HALT_H1_LOOP` | Topological fracture — H₁ loop sum exceeds threshold | Wait for manifold compaction (H1 reset) |
+| `ERR_MANDRA_ENTROPY` | ΔE is negative — market is chaotic | Stop execution immediately |
+| `FUSION:LAMBDA_VETO` | Any λ sensor issued a hard veto | Inspect `r['veto']['reasons']` for the specific sensor |
+| `CONF:INSUFFICIENT` | Fusion confidence < 0.2 | Insufficient signal agreement — wait for consensus |
+| `MANDRA:ΔE<0` | Negative information energy gain | Do not trade — chaotic state |
+| `L3:LIAR_STATE` | FFT phase inversion > π/2 in λ3 Harmonic | Wait for phase realignment |
+
+---
+
+## Known weaknesses
+
+<AccordionGroup>
+  <Accordion title="λ3 Harmonic Trap Paradox">
+    During ultra-high-frequency volatility bursts (e.g., news events with bid-ask spread widening > 5 pips on EUR/USD), λ3 may over-veto via `VETO_LIAR_STATE` even when the structural DNA — DealingRange, FVGs, and AMD state — is clearly bullish.
+
+    **Symptom:** `VETO_LIAR_STATE` fires on 3+ consecutive bars during a strong displacement move. The chart shows a clear Order Block and FVG entry opportunity, but the veto panel shows repeated λ3 blocks.
+
+    **Mitigation:** Monitor for Opportunity Decay — the window where a valid signal was blocked by λ3 and the move is now underway without a position. Log these instances to a separate file for post-session review and use them to calibrate the λ3 phase threshold (default π/2, adaptive range π/4–3π/4).
+  </Accordion>
+
+  <Accordion title="Adelic Tube over-sensitivity">
+    The p-adic radius in the Adelic Tube (`core/adelic/`) determines the tolerance for causal force vectors. When the radius is too narrow, valid institutional price delivery is flagged as a λ8 Light-Cone Violation.
+
+    **Symptom:** `λ8 Kill-Switch` fires repeatedly during clean trending sessions with no evidence of front-running. `r['sensors']` shows `lambda8` scores above 0.7 on trend-continuation bars.
+
+    **Mitigation:** Widen the p-adic radius incrementally. There is no universal correct value — it depends on the instrument's typical volatility and delivery speed. Backtest with at least 3 months of data before tightening the radius in production.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Numpy fallback mode
+
+If `SMK_DIR` is not set or module imports fail, `smk_pipeline._find_smk_root()` cannot locate the project root. The server starts but runs with all 18 detector modules replaced by numpy stubs that return neutral scores.
+
+**How to detect fallback mode:**
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+```json
+{
+  "modules_ok":    0,
+  "import_errors": 18,
+  "pipeline":      "numpy_fallback"
+}
+```
+
+All `r['sensors']` values will be `0.5` and `r['veto']['trade_allowed']` will always be `False` in fallback mode.
+
+**Resolution:**
+
+<Steps>
+  <Step title="Verify SMK_DIR is set">
+    ```bash
+    echo $SMK_DIR
+    # Should print the project root path, e.g. /home/you/QUIMERIA-HYPERION
+    ```
+  </Step>
+  <Step title="Verify PYTHONPATH includes both the root and backend">
+    ```bash
+    echo $PYTHONPATH
+    # Should include: /path/to/QUIMERIA-HYPERION:/path/to/QUIMERIA-HYPERION/backend
+    ```
+  </Step>
+  <Step title="Restart the server with the correct environment">
+    ```bash
+    export SMK_DIR=/path/to/QUIMERIA-HYPERION
+    export PYTHONPATH=$SMK_DIR:$SMK_DIR/backend:$PYTHONPATH
+    cd backend
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ```
+  </Step>
+  <Step title="Check session.log for specific import errors">
+    ```bash
+    curl "http://localhost:8000/api/logs/session.log?lines=50"
+    ```
+    Each failed module import is logged with the specific exception so you can identify missing dependencies.
+  </Step>
+</Steps>
+
+---
+
+## SMK_DIR resolution order
+
+`smk_pipeline._find_smk_root()` searches for the project root in this order:
+
+1. `SMK_DIR` environment variable (highest priority)
+2. Walk up from `backend/` looking for `requirements.txt`
+3. Fall back to numpy stubs if neither succeeds
+
+Always use `SMK_DIR` in production — the walk-up heuristic can resolve to the wrong directory if the backend is run from an unexpected working directory.
+
+---
+
+## Breakage-prevention rules
+
+Follow these rules before and during live operation to avoid the most common failure modes:
+
+- **Never execute** without Mandra Gate ΔE > 0.02 confirmation.
+- **Always verify** ATR₂₀ benchmarks before triggering the λ1 Phase Entrapment threshold.
+- **Never override** a λ7 Macro Gate veto during Privileged Mode (central bank intervention).
+- **Always ensure** HMM Regime is STABLE (1 or 2) before increasing Kelly position sizing.
+- **Never increase** Kelly fraction beyond 0.5 — the UQPCE uncertainty engine clips it at this value.
+
+---
+
+## Safe upgrade to v1.1
+
+<Steps>
+  <Step title="Verify all 25 modules are status OK">
+    ```bash
+    curl http://localhost:8000/api/status
+    # Confirm: "modules_ok": 25, "import_errors": 0
+    ```
+  </Step>
+  <Step title="Register new forensic modules">
+    ```bash
+    python backend/plugin_manager.py
+    ```
+  </Step>
+  <Step title="Wipe the ATR₂₀ cache">
+    Stale ATR₂₀ values in the cache cause incorrect λ1 Phase Entrapment triggers. Restart the server with a fresh data load after any kernel change.
+  </Step>
+  <Step title="Back up core kernel and risk modules">
+    ```bash
+    cp -r core/kernel/ core/kernel.bak/
+    cp -r risk/ risk.bak/
+    ```
+    Keep this backup until you have run at least one full trading session on v1.1 without errors.
+  </Step>
+</Steps>

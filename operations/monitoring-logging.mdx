@@ -1,0 +1,213 @@
+---
+title: "Monitor trades and system events with SMK logs"
+description: "Read, query, and interpret the five rotating SMK log streams — events, veto, trades, session, and raw bars — via the REST API or dashboard panels."
+---
+
+QUIMERIA-HYPERION writes all pipeline activity to five rotating log files under the `logs/` directory. The directory is created automatically on first startup relative to the project root. Each log file is written by a dedicated logger in `backend/logger.py` using Python's `RotatingFileHandler` — files rotate at 10 MB and keep five backups, except `raw_bars.log` which rotates at 50 MB.
+
+---
+
+## Log streams
+
+| File | Content |
+|------|---------|
+| `logs/events.log` | FVGs detected, AMD state transitions, Judas swings, approved signals |
+| `logs/veto.log` | Every bar's Ring 0 decision — `trade_allowed`, veto reason, and `p_fused` score |
+| `logs/trades.log` | Trade opens and closes with entry price, exit price, and realized P&L |
+| `logs/session.log` | Server start, data loads, live feed start/stop, module import results |
+| `logs/raw_bars.log` | Full `step()` result JSON for every bar (50 MB rotation limit) |
+
+<Note>
+  `raw_bars.log` grows quickly during backtests. It is intended for debugging and should not be left enabled in high-throughput production environments unless you have sufficient disk space.
+</Note>
+
+---
+
+## Log rotation configuration
+
+All five loggers are configured in `backend/logger.py` using `_make_logger()`. The defaults are:
+
+| Parameter | Value |
+|-----------|-------|
+| Max file size | 10 MB (50 MB for `raw_bars.log`) |
+| Backup count | 5 rotated files |
+| Encoding | UTF-8 |
+| Timestamp format | `YYYY-MM-DD HH:MM:SS UTC` |
+
+Rotated files are named `events.log.1`, `events.log.2`, etc. The active log is always `events.log`.
+
+---
+
+## Reading logs via the REST API
+
+### List available log files
+
+```bash
+curl http://localhost:8000/api/logs
+```
+
+```json
+[
+  "events.log",
+  "veto.log",
+  "trades.log",
+  "session.log",
+  "raw_bars.log"
+]
+```
+
+### Read a log file (last N lines)
+
+The `lines` query parameter controls how many lines from the end of the file are returned. The default is 100.
+
+```bash
+curl "http://localhost:8000/api/logs/events.log?lines=200"
+```
+
+```bash
+curl "http://localhost:8000/api/logs/veto.log?lines=50"
+```
+
+```bash
+curl "http://localhost:8000/api/logs/trades.log?lines=100"
+```
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    # Last 200 lines of events log
+    curl "http://localhost:8000/api/logs/events.log?lines=200"
+
+    # Last 50 veto decisions
+    curl "http://localhost:8000/api/logs/veto.log?lines=50"
+
+    # Trade P&L history
+    curl "http://localhost:8000/api/logs/trades.log?lines=100"
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    r = httpx.get(
+        "http://localhost:8000/api/logs/events.log",
+        params={"lines": 200},
+    )
+    for line in r.json()["lines"]:
+        print(line)
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Log entry formats
+
+### events.log
+
+```
+[2026-01-15 12:34:56 UTC] BAR#247 FVG_BULLISH low=1.10320 high=1.10580 strength=0.82
+[2026-01-15 12:35:00 UTC] BAR#248 AMD_TRANSITION: ACCUMULATION → MANIPULATION
+[2026-01-15 12:35:04 UTC] BAR#249 JUDAS_SWING high=1.10601 reversal_confirmed=True
+[2026-01-15 12:35:08 UTC] BAR#250 SIGNAL APPROVED p_fused=0.87 confidence=0.91
+```
+
+### veto.log
+
+Every bar produces exactly one veto log entry with the Ring 0 decision:
+
+```
+[2026-01-15 12:34:56 UTC] BAR#247 VETO: trade_allowed=True  decision=PROCEED  p_fused=0.87
+[2026-01-15 12:35:00 UTC] BAR#248 VETO: trade_allowed=False decision=HALT     reason=MANDRA:ΔE<0.02
+[2026-01-15 12:35:04 UTC] BAR#249 VETO: trade_allowed=False decision=HALT     reason=FUSION:LAMBDA_VETO
+```
+
+### trades.log
+
+```
+[2026-01-15 12:35:08 UTC] OPEN  #T001 BUY  EURUSD 0.10 lots @ 1.10512  SL=1.10200 TP=1.11000
+[2026-01-15 13:22:41 UTC] CLOSE #T001 BUY  EURUSD 0.10 lots @ 1.10998  PnL=+$48.60
+```
+
+### session.log
+
+```
+[2026-01-15 10:00:01 UTC] Server startup: QUIMERIA-HYPERION v1.1
+[2026-01-15 10:00:02 UTC] Modules loaded: 18/18  Import errors: 0
+[2026-01-15 10:00:03 UTC] Plugins discovered: 6
+[2026-01-15 10:05:12 UTC] CSV loaded: EURUSD_H1.csv  bars=2340
+[2026-01-15 12:34:50 UTC] Live feed started: EURUSDT 1m
+```
+
+---
+
+## TradingView dashboard panels
+
+The frontend (`frontend/index.html`) displays three live log panels that stream from the same log files via the REST API:
+
+| Panel | Source | Update frequency |
+|-------|--------|-----------------|
+| Events panel | `logs/events.log` | Every bar (on WebSocket frame) |
+| Veto panel | `logs/veto.log` | Every bar |
+| Trades panel | `logs/trades.log` | On open/close events |
+
+The dashboard also shows:
+- **14 SMK sensor bars** — real-time λ scores from `r['sensors']`
+- **6 plugin sensor bars** — forensic detector scores appended to `sensors[]`
+- **AMD state machine** — current IPDA phase (Accumulate / Manipulate / Distribute / Retrace)
+- **Execution panel** — AEGIS bridge status, veto authority indicator, and last signal ID
+- **TradingView Lightweight Charts v4** — candlestick chart with FVG and order block overlays
+
+---
+
+## Streaming logs from the command line
+
+For server-side monitoring without the dashboard, follow the backend log directly:
+
+```bash
+# Follow the combined backend stdout/stderr
+tail -f logs/backend.log
+
+# Follow veto decisions in real time
+tail -f logs/veto.log
+
+# Follow trade opens and closes
+tail -f logs/trades.log
+```
+
+<Tip>
+  During initial deployment, watch `logs/session.log` at startup to verify that all 18 SMK modules loaded without import errors. Each module emits a `[INFO]` or `[WARN]` line as it initializes.
+</Tip>
+
+---
+
+## System status endpoint
+
+`GET /api/status` returns a comprehensive snapshot of the pipeline state, including module counts, live feed status, and bar count:
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+```json
+{
+  "status":        "ready",
+  "bars_loaded":   2340,
+  "symbol":        "EURUSD",
+  "pipeline":      "initialized",
+  "modules_ok":    18,
+  "import_errors": 0,
+  "plugins":       6,
+  "live_feed": {
+    "running":       false,
+    "symbol":        null,
+    "granularity":   null,
+    "clients":       0
+  },
+  "aegis": {
+    "slm":           true,
+    "aegis":         true,
+    "router":        true
+  }
+}
+```

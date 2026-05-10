@@ -1,0 +1,230 @@
+---
+title: "AEGIS execution bridge: status and trade statistics"
+description: "Control the live Bitget feed and query the AEGIS execution bridge, including StopLossManager session stats and the Ring 0 trade-allowed gate."
+---
+
+The AEGIS bridge is the final layer between SMK signal generation and real order placement. It wires the `step()` result through a CLM tokenizer, a `SequenceStopLossManager`, and (when installed) `AegisExtensions` for Kelly sizing and venue routing. All bridge dependencies are lazy-loaded — a missing `stop_loss_manager.py` or `aegis_extensions.py` degrades gracefully without crashing the server.
+
+## AEGIS bridge architecture
+
+```
+SMK step() result
+    ↓  r['veto']['trade_allowed'] == True?
+    ├── NO  → skip, log to veto.log
+    └── YES ↓
+        CLMTokenizer.sequence(last 8 bars)   →  "BWBUID…" (7-symbol alphabet)
+        SequenceStopLossManager.calculate()  →  SL%, TP multiplier, lot size, R:R gate
+        AegisExtensions.on_signal()          →  kelly_size + venue_allocation[]
+            MandraBitGate → RevPeriodGuard → SchurRouter
+        result stored in r['execution']
+```
+
+The key execution gate is `r['veto']['trade_allowed']`. AEGIS checks this boolean before invoking any order logic. If it is `False`, the execution section of the step result will show `action: "VETO"`.
+
+## POST /api/live/start
+
+Start the Bitget REST polling live feed. The feed polls the Bitget spot candle endpoint every 5 seconds, bootstraps 100 bars of history to warm the pipeline, then processes each new closed candle through `step()` and broadcasts results to `ws://localhost:8000/ws/live` subscribers.
+
+### Request body
+
+<ParamField body="api_key" type="string" default="">
+  Bitget API key. Leave empty to use the `BITGET_API_KEY` environment variable, or to access public endpoints only.
+</ParamField>
+
+<ParamField body="symbol" type="string" default="EURUSDT">
+  Bitget spot symbol to poll, for example `"BTCUSDT"` or `"EURUSDT"`.
+</ParamField>
+
+<ParamField body="granularity" type="string" default="1m">
+  Candle interval for the live feed: `"1m"`, `"5m"`, `"15m"`, `"1H"`.
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"` when the feed starts successfully.
+</ResponseField>
+
+<ResponseField name="symbol" type="string">
+  The symbol being polled.
+</ResponseField>
+
+<ResponseField name="granularity" type="string">
+  The candle interval.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/api/live/start \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "EURUSDT", "granularity": "1m"}'
+```
+
+```json
+{"status": "ok", "symbol": "EURUSDT", "granularity": "1m"}
+```
+
+---
+
+## POST /api/live/stop
+
+Stop the Bitget polling live feed. Existing WebSocket connections to `/ws/live` are not closed but will receive no further bar messages.
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"stopped"` when successfully halted, or `"realtime not available"` if the realtime module was not loaded.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/api/live/stop
+```
+
+```json
+{"status": "stopped"}
+```
+
+---
+
+## GET /api/execution/status
+
+Return AEGIS bridge availability and current configuration. Use this to verify whether the full execution chain is wired before starting live trading.
+
+### Response
+
+<ResponseField name="slm_available" type="boolean">
+  `true` if `StopLossManager` imported successfully from `managers/stop_loss_manager.py`.
+</ResponseField>
+
+<ResponseField name="aegis_available" type="boolean">
+  `true` if `AegisExtensions` imported successfully from `utils/aegis_extensions.py`.
+</ResponseField>
+
+<ResponseField name="enabled" type="boolean">
+  Whether the bridge is currently enabled (will process PROCEED bars).
+</ResponseField>
+
+<ResponseField name="capital" type="number">
+  Capital amount configured for Kelly position sizing.
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:8000/api/execution/status
+```
+
+```json
+{
+  "slm_available": true,
+  "aegis_available": true,
+  "enabled": true,
+  "capital": 10000.0
+}
+```
+
+<Note>
+If `slm_available` or `aegis_available` is `false`, the pipeline still runs and generates signals, but the `r['execution']` section of each bar result will be minimal — no Kelly sizing, no venue allocation, and no stop-loss levels.
+</Note>
+
+---
+
+## GET /api/execution/stats
+
+Return session statistics from the `StopLossManager`, including win/loss counts, average R:R ratios, and sequence pattern frequency.
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"` when the bridge is available, or `"unavailable"` with an `error` key when it is not.
+</ResponseField>
+
+<ResponseField name="stats" type="object">
+  Session statistics from the StopLossManager.
+
+  <Expandable title="Stats object fields">
+    <ResponseField name="total_signals" type="integer">
+      Number of PROCEED signals processed this session.
+    </ResponseField>
+    <ResponseField name="wins" type="integer">
+      Trades that closed at or above the take-profit level.
+    </ResponseField>
+    <ResponseField name="losses" type="integer">
+      Trades that closed at or below the stop-loss level.
+    </ResponseField>
+    <ResponseField name="win_rate" type="number">
+      `wins / total_signals` as a float between 0 and 1.
+    </ResponseField>
+    <ResponseField name="avg_rr" type="number">
+      Average realised risk-to-reward ratio.
+    </ResponseField>
+    <ResponseField name="dominant_pattern" type="string">
+      Most frequent CLM bar sequence seen, for example `"BWBU"`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:8000/api/execution/stats
+```
+
+```json
+{
+  "status": "ok",
+  "stats": {
+    "total_signals": 42,
+    "wins": 28,
+    "losses": 14,
+    "win_rate": 0.667,
+    "avg_rr": 1.85,
+    "dominant_pattern": "BWBUI"
+  }
+}
+```
+
+---
+
+## The veto flow: r['veto']['trade_allowed']
+
+Every bar processed by `step()` produces a `veto` section. This is the canonical execution gate that AEGIS and the frontend both read.
+
+```json
+{
+  "veto": {
+    "decision": "Proceed",
+    "reasons": [],
+    "trade_allowed": true
+  }
+}
+```
+
+When any Ring 0 condition triggers, `trade_allowed` flips to `false` and one or more reason codes are added:
+
+| Reason code | Trigger |
+|-------------|---------|
+| `MANDRA:DE<0` | Mandra Gate: negative information energy gain (ΔE < 0.02) |
+| `TOPO:H1_FRACTURE` | Persistent homology H₁ loop sum exceeds threshold |
+| `FUSION:LAMBDA_VETO` | Lambda fusion engine issued a hard veto |
+| `L3:LIAR_STATE` | Harmonic trap: FFT phase inversion > π/2 |
+| `KL:REGIME_FRACTURE` | KL divergence > 1.3× threshold |
+| `CONF:INSUFFICIENT` | Fusion confidence < 0.2 |
+| `ACTION_CENTER:PENDING` | Action Center awaiting human confirmation |
+
+```json
+{
+  "veto": {
+    "decision": "Halt",
+    "reasons": ["MANDRA:DE<0", "CONF:INSUFFICIENT"],
+    "trade_allowed": false
+  }
+}
+```
+
+<Tip>
+Stream the veto log via `GET /api/logs/veto.log?lines=50` to trace which conditions are triggering most frequently during a backtest session.
+</Tip>

@@ -1,0 +1,100 @@
+---
+title: "QUIMERIA-HYPERION: Algorithmic Trading Intelligence"
+description: "The Sovereign Market Kernel decodes the IPDA cycle in real time using Bayesian regime detection, spectral forensics, and FAISS-powered pattern memory."
+---
+
+QUIMERIA-HYPERION is the **Sovereign Market Kernel (SMK)** — a production-ready, modular algorithmic trading platform built on a single guiding principle: markets are not random. Price action follows a deterministic Interbank Price Delivery Algorithm (IPDA) that repeats a four-phase cycle of Accumulation, Manipulation, Distribution, and Retrace. Every component of the SMK exists to detect, confirm, and act on that cycle with institutional-grade precision.
+
+Unlike conventional systems that bolt together independent indicators, QUIMERIA processes market data through a unified, layered kernel. Each layer adds context — structural ranges, liquidity imbalances, harmonic signals, macro causality — until Ring 0 either clears the trade or issues a hard veto. No signal reaches execution without passing every gate.
+
+## Core philosophy
+
+> "The market is a delivery algorithm. We just decode it."
+
+The IPDA framework, developed from ICT (Inner Circle Trader) concepts, treats interbank price delivery as a structured, repeating algorithm. Rather than predicting price direction, the SMK identifies *where* the algorithm is in its current cycle and *what delivery is most probable next*. The AMD state machine — Accumulate → Manipulate → Distribute → Retrace — is the primary structural lens.
+
+## System architecture
+
+The kernel is organized into concentric rings and numbered layers. Ring -1 orchestrates the overall regime. Layers 1 through 4 process structure, memory, sensing, and forensics in sequence. Ring 0 holds final veto authority.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         SOVEREIGN MARKET KERNEL                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RING -1: BAYESIAN ORCHESTRATION                                            │
+│  ├── HMM Regime Tracker (7ZERO)                                            │
+│  ├── GMOS Governor (Hamiltonian Energy)                                     │
+│  └── OBNFE Kill Switch                                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 1: IPDA STRUCTURAL COMPILER                                          │
+│  ├── Dealing Range (20/40/60-day)                                          │
+│  ├── Premium/Discount Zone                                                  │
+│  ├── Equilibrium Cross                                                      │
+│  └── AMD State Machine (Accumulate→Manipulate→Distribute→Retrace)          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 2: MEMORY & IMBALANCE                                                │
+│  ├── FVG Detector (Fair Value Gaps)                                        │
+│  ├── Order Block Detector                                                   │
+│  └── Volume Profile Engine (TAP Density)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 3: λ SENSORS (The "Senses")                                         │
+│  ├── λ₁ Volatility Decay (Entrapment)                                      │
+│  ├── λ₂ Killzone Timing                                                    │
+│  ├── λ₃ Harmonic Inversion (FFT Phase)                                     │
+│  ├── λ₄ Manipulation Phase (Judas Swing)                                   │
+│  ├── λ₅ Displacement (Order Flow Burst)                                    │
+│  ├── λ₆ Macro Bias                                                         │
+│  ├── λ₇ Macro Causality (DXY/SPX)                                          │
+│  └── λ₈ Light-Cone Violation (Information Leakage)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  LAYER 4: FORENSICS & PLUGINS                                               │
+│  ├── Market Rhythm (MIR Spectrogram)                                       │
+│  ├── Market Heuristic (AV-Style Scoring)                                   │
+│  ├── Market Vision (SIFT Keypoints)                                        │
+│  ├── Market Seismology (P/S/Surface Waves)                                 │
+│  ├── File Carving Engine (S/R Clustering)                                  │
+│  └── Signature Scan Engine (Pattern DB)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  RING 0: FUSION & VETO AUTHORITY                                           │
+│  ├── Lambda Fusion Engine (OBNFE)                                          │
+│  ├── Mandra Gate (ΔE ≥ 2 Information Constraint)                           │
+│  ├── KL Divergence (Regime Fracture)                                       │
+│  └── Topological Fracture (Persistent Homology)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  EXECUTION LAYER                                                            │
+│  ├── AEGIS Bridge (StopLossManager + SchurRouter)                          │
+│  ├── Smart Intelligence (FAISS Memory + GRU)                               │
+│  └── Auto-Profit Manager (2% adjustable)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Key differentiators
+
+**Multi-layered veto authority.** Six hard-stop conditions in Ring 0 can independently halt execution. No single layer can override a veto from another — the system is designed to miss trades rather than take bad ones.
+
+**Fail-safe architecture.** Every module loads through a `try_load()` wrapper. Missing optional dependencies degrade gracefully to numpy stubs. The server never crashes on an import failure.
+
+**Forensic plugin layer.** Six forensic plugins — Market Rhythm, Market Heuristic, Market Vision, Market Seismology, File Carving Engine, and Signature Scan Engine — operate as an extensible Layer 4 that appends additional sensor scores to every bar result.
+
+**Full-stack integration.** A single HTML dashboard (`frontend/index.html`) displays TradingView Lightweight Charts, 14 SMK sensor bars, 6 plugin sensor bars, AMD state visualization, and live log panels — all over REST and WebSocket with no build step required.
+
+## Explore the platform
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Clone the repo, set SMK_DIR, start the backend, and open the dashboard in minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed setup for Python dependencies, optional GPU packages, and the Rust subproject.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Configure environment variables, module toggles, and key signal thresholds.
+  </Card>
+  <Card title="API reference" icon="code" href="/api/overview">
+    REST endpoints, WebSocket commands, and the plugin development contract.
+  </Card>
+</CardGroup>
+
+<Warning>
+  QUIMERIA-HYPERION is for educational and research purposes only. Algorithmic trading involves substantial risk of financial loss. Always paper trade before going live. Never commit API keys to source control.
+</Warning>

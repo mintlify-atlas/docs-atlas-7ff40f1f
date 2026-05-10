@@ -1,0 +1,188 @@
+---
+title: "Live Bitget WebSocket feed: real-time candle stream"
+description: "Connect to the live Bitget feed WebSocket to receive real-time OHLCV bars processed through the full SMK pipeline as they close on the exchange."
+---
+
+The `/ws/live` endpoint delivers real-time bar results as Bitget candles close. Unlike `/ws/stream`, which replays a pre-loaded dataset at a configurable speed, `/ws/live` receives live market data and passes each new bar through the complete SMK pipeline before broadcasting to all connected clients.
+
+## Endpoint
+
+```
+ws://localhost:8000/ws/live
+```
+
+## Differences from /ws/stream
+
+| Feature | `/ws/stream` | `/ws/live` |
+|---------|-------------|------------|
+| Data source | Pre-loaded dataset (CSV/Bitget/OANDA) | Bitget REST API polling (5s interval) |
+| Speed control | `speed` parameter in ms | Fixed by candle close time on exchange |
+| Commands | `run`, `step`, `stop`, `reset` | None — passive receiver only |
+| Startup | Send `run` command after connect | Start feed via REST first |
+| Use case | Backtesting, development, replay | Live monitoring and signal watching |
+
+## Starting the live feed
+
+The polling process runs server-side. Start and stop it via REST before opening the WebSocket connection:
+
+```bash
+# Start polling EURUSDT 1-minute candles
+curl -X POST http://localhost:8000/api/live/start \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "EURUSDT", "granularity": "1m"}'
+
+# Stop the feed
+curl -X POST http://localhost:8000/api/live/stop
+```
+
+Check feed status at any time:
+
+```bash
+curl http://localhost:8000/api/live/status
+```
+
+```json
+{
+  "running": true,
+  "symbol": "EURUSDT",
+  "granularity": "1m",
+  "clients": 1,
+  "last_ts": 1715123400
+}
+```
+
+## Message format
+
+Each message from the server is a JSON object with `type: "bar"` and the complete SMK `step()` result plus two additional live-specific fields:
+
+```json
+{
+  "type": "bar",
+  "data": {
+    "live": true,
+    "symbol": "EURUSDT",
+    "bar": {
+      "time": 1715123400,
+      "open": 1.09120,
+      "high": 1.09180,
+      "low": 1.09090,
+      "close": 1.09155,
+      "volume": 843
+    },
+    "bar_index": 101,
+    "total_bars": 101,
+    "veto": {
+      "decision": "Proceed",
+      "reasons": [],
+      "trade_allowed": true
+    },
+    "amd": {"state": "Distribution", "changed": false},
+    "fusion": {"p_fused": 0.71, "confidence": 0.78, "regime": "TRENDING"},
+    "sensors": [ /* 14 SMK + 6 plugin sensor rows */ ],
+    "execution": {
+      "action": "LONG",
+      "is_armed": true,
+      "stop_loss_price": 1.09050,
+      "take_profit_price": 1.09350,
+      "lot_size": 0.03
+    }
+  }
+}
+```
+
+The `live: true` field distinguishes live messages from backtest messages. The `symbol` field identifies the instrument being tracked.
+
+## Keepalive
+
+Send the string `"ping"` to keep the connection alive during low-activity periods. The server does not send a `"pong"` response but will not close the connection.
+
+```python
+await ws.send("ping")
+```
+
+## Client examples
+
+<CodeGroup>
+
+```python python
+import asyncio
+import json
+import httpx
+import websockets
+
+async def watch_live():
+    # 1. Start the live feed via REST
+    httpx.post("http://localhost:8000/api/live/start", json={
+        "symbol": "EURUSDT",
+        "granularity": "1m",
+    })
+
+    # 2. Connect to the WebSocket and listen
+    uri = "ws://localhost:8000/ws/live"
+    async with websockets.connect(uri) as ws:
+        print("Connected — waiting for live bars...")
+        async for raw in ws:
+            # Skip ping/keepalive echoes
+            if raw == "pong":
+                continue
+
+            msg = json.loads(raw)
+            if msg.get("type") != "bar":
+                continue
+
+            d = msg["data"]
+            bar  = d["bar"]
+            veto = d["veto"]
+            amd  = d["amd"]["state"]
+            allowed = veto["trade_allowed"]
+
+            print(
+                f"[{d['symbol']}] close={bar['close']:.5f}  "
+                f"AMD={amd}  allowed={allowed}  "
+                f"reasons={veto['reasons']}"
+            )
+
+asyncio.run(watch_live())
+```
+
+```javascript browser
+// Start the feed via fetch, then connect
+fetch("http://localhost:8000/api/live/start", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ symbol: "EURUSDT", granularity: "1m" }),
+}).then(() => {
+  const ws = new WebSocket("ws://localhost:8000/ws/live");
+
+  ws.onopen = () => console.log("Live feed connected");
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type !== "bar") return;
+
+    const { bar, veto, amd, execution } = msg.data;
+    console.log(
+      `Close: ${bar.close}  AMD: ${amd.state}  ` +
+      `Allowed: ${veto.trade_allowed}  ` +
+      `Action: ${execution?.action ?? "—"}`
+    );
+  };
+
+  // Keepalive every 30 seconds
+  setInterval(() => ws.send("ping"), 30_000);
+});
+```
+
+</CodeGroup>
+
+<Warning>
+The live feed polls Bitget every 5 seconds. A new bar message is only sent when a candle closes, so during low-volatility periods you may wait several seconds between messages. Do not close the connection on silence — use a keepalive ping.
+</Warning>
+
+## Stopping the feed
+
+Stop the server-side polling task when you no longer need live data. Connected WebSocket clients will stay connected but receive no further messages.
+
+```bash
+curl -X POST http://localhost:8000/api/live/stop
+```

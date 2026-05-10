@@ -1,0 +1,231 @@
+---
+title: "Forensic plugin architecture and extension points"
+description: "How the SMKPlugin base class, PLUGIN_REGISTRY, and PluginManager auto-discovery system extend the pipeline with six built-in forensic engines and custom plugins."
+---
+
+The SMK plugin system provides a clean extension point for adding forensic analysis modules without modifying the core pipeline. Plugins are auto-discovered from `PLUGIN_REGISTRY` on server start, run on every bar after the core `step()` completes, and append their results to the `sensors[]` array in the step result dict. The frontend's six forensic sensor bars consume these rows directly over the WebSocket.
+
+## The SMKPlugin base class
+
+All plugins must subclass `SMKPlugin`, which is defined in `backend/plugins/__init__.py`. The base class handles warmup tracking, enabled/disabled state, and the bar counter. Subclasses implement one method: `update()`.
+
+```python
+from plugins import SMKPlugin
+import pandas as pd
+
+class MyPlugin(SMKPlugin):
+    name       = "MyPlugin"
+    sensor_id  = "p07"
+    layer      = "L3-ext"
+    requires_warmup = 20   # bars needed before firing
+
+    def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+        """
+        Called once per bar after the core pipeline completes.
+
+        Args:
+            bar:  Current OHLCV bar dict {time, open, high, low, close, volume}
+            df:   DataFrame of the rolling 60-bar window
+            smk:  Full step() result dict from the core pipeline
+
+        Returns:
+            Plain Python dict with at minimum: score, active, status
+        """
+        close = bar["close"]
+        score = min(1.0, abs(close - df["close"].mean()) / df["close"].std())
+        return {
+            "score":      round(score, 4),
+            "score_norm": round(score, 4),  # used for sensor bar height
+            "active":     score > 0.7,
+            "status":     "FIRING" if score > 0.7 else "IDLE",
+        }
+```
+
+<Note>
+The `update()` method is wrapped by `on_bar()` in the base class, which enforces warmup counting and calls `update()` only after `requires_warmup` bars have been seen. If your plugin is not firing on early bars, this is expected behavior.
+</Note>
+
+### Plugin contract rules
+
+- Return only plain Python types: `int`, `float`, `bool`, `str`, `list`, `dict`. Never return `np.float32`, `np.int64`, or any numpy array — these will break WebSocket JSON serialization.
+- Always include `score` (or `score_norm`) and `active` in the return dict. The `to_sensor_rows()` method in `PluginManager` reads these keys to build frontend sensor rows.
+- The `smk` argument gives read-only access to the full step result. Use it to read `smk['veto']`, `smk['fusion']`, or any layer output.
+
+---
+
+## PLUGIN_REGISTRY
+
+The registry in `backend/plugin_manager.py` is the single source of truth for which plugins load. Each entry is a `(module_path, class_name)` tuple:
+
+```python
+PLUGIN_REGISTRY = [
+    ("plugins.market_rhythm",      "MarketRhythmPlugin"),
+    ("plugins.market_heuristic",   "MarketHeuristicPlugin"),
+    ("plugins.market_vision",      "MarketVisionPlugin"),
+    ("plugins.market_seismology",  "MarketSeismologyPlugin"),
+    ("plugins.kali_forensics",     "FileCarvingPlugin"),
+    ("plugins.kali_forensics",     "SignatureScanPlugin"),
+]
+```
+
+To register a new plugin, add a tuple to this list. The `PluginManager` will import the module and instantiate the class on next server start.
+
+---
+
+## Auto-discovery on server start
+
+`PluginManager.load_all()` iterates over `PLUGIN_REGISTRY` and calls `importlib.import_module()` for each entry. Failed imports are caught, logged to `_errors`, and skipped — the server never crashes if a plugin's optional dependencies are missing.
+
+```python
+def load_all(self) -> None:
+    loaded = 0
+    for module_path, class_name in PLUGIN_REGISTRY:
+        try:
+            mod    = importlib.import_module(module_path)
+            cls    = getattr(mod, class_name)
+            plugin = cls()
+            self.plugins.append(plugin)
+            loaded += 1
+            print(f"[PLUGIN] Loaded: {plugin.layer:8s} {plugin.name}")
+        except Exception as e:
+            self._errors[class_name] = str(e)
+            print(f"[PLUGIN] SKIP {class_name}: {e}")
+
+    print(f"[PLUGIN] {loaded}/{len(PLUGIN_REGISTRY)} plugins loaded")
+```
+
+A global singleton is created the first time `get_plugin_manager()` is called from `smk_pipeline.py`:
+
+```python
+_plugin_mgr: Optional[PluginManager] = None
+
+def get_plugin_manager() -> PluginManager:
+    global _plugin_mgr
+    if _plugin_mgr is None:
+        _plugin_mgr = PluginManager()
+        _plugin_mgr.load_all()
+    return _plugin_mgr
+```
+
+You can inspect plugin load status at runtime via the REST API:
+
+```bash
+curl http://localhost:8000/api/plugins
+```
+
+---
+
+## How plugins integrate with step()
+
+After the core pipeline finishes all Ring 0 checks, the plugin layer runs inside `step()`:
+
+```python
+# ── Plugin layer ──────────────────────────────────────────────────────
+try:
+    mgr = _get_plugins()
+    if mgr:
+        plugin_results = mgr.run(cur, df, r)
+        r['plugins'] = plugin_results
+        r['sensors'] += mgr.to_sensor_rows(plugin_results)
+except Exception:
+    r['plugins'] = {}
+```
+
+`mgr.run()` calls each enabled plugin's `on_bar()` method and collects results into a dict keyed by `plugin.name`. `mgr.to_sensor_rows()` converts those results into the standard sensor row format and appends them after the 19 built-in SMK sensor rows:
+
+```python
+# Sensor row format (same schema as s01–s19)
+{
+    "id":     "p01",
+    "name":   "MarketRhythm",
+    "score":  0.74,
+    "active": True,
+    "layer":  "L3-ext",
+    "status": "TEMPO_LOCK",
+}
+```
+
+The frontend displays these as the six forensic sensor bars below the main 14 SMK sensor bars.
+
+---
+
+## Built-in plugins
+
+Six forensic plugins ship with QUIMERIA-HYPERION, all auto-discovered via `PLUGIN_REGISTRY`:
+
+| Sensor ID | Plugin name | Layer | Detection capability |
+|-----------|-------------|-------|---------------------|
+| p01 | MarketRhythm | L3-ext | Spectrogram tempo analysis, λ₃ harmonic harmony scoring, Shazam-style audio fingerprinting of OHLC rhythm |
+| p02 | MarketHeuristic | L3-ext | Stop-hunt wick detection, volume spike scoring, entropy-based threat score (AV-style heuristic) |
+| p03 | MarketVision | L2-ext | SIFT keypoint extraction, ORB descriptor matching, Smith-Waterman sequence homology on price structure |
+| p04 | MarketSeismology | L3-ext | P-wave / S-wave / Surface wave classification on OHLC velocity and acceleration profiles |
+| p05 | FileCarvingEngine | L2-ext | Support/resistance level clustering (DBSCAN), accumulation zone identification |
+| p06 | SignatureScanEngine | L2-ext | Entropy regime classification, 14-pattern signature database matching |
+
+---
+
+## Adding a new plugin
+
+<Steps>
+  <Step title="Create the plugin file">
+    Create `backend/plugins/my_plugin.py`. Import and subclass `SMKPlugin`:
+
+    ```python
+    from plugins import SMKPlugin
+    import pandas as pd
+
+    class MyPlugin(SMKPlugin):
+        name       = "MyPlugin"
+        sensor_id  = "p07"
+        layer      = "L4-ext"
+        requires_warmup = 30
+
+        def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+            # Your forensic logic here
+            score = 0.5
+            return {
+                "score":      score,
+                "score_norm": score,
+                "active":     score > 0.6,
+                "status":     "ACTIVE" if score > 0.6 else "IDLE",
+            }
+    ```
+  </Step>
+
+  <Step title="Register in PLUGIN_REGISTRY">
+    Add your entry to the registry list in `backend/plugin_manager.py`:
+
+    ```python
+    PLUGIN_REGISTRY = [
+        # ... existing entries ...
+        ("plugins.my_plugin", "MyPlugin"),
+    ]
+    ```
+  </Step>
+
+  <Step title="Restart the server">
+    The plugin is loaded on startup by `PluginManager.load_all()`. After restarting:
+
+    ```bash
+    cd backend
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ```
+
+    Confirm it loaded by checking the startup logs for `[PLUGIN] Loaded: L4-ext   MyPlugin` or by querying `GET /api/plugins`.
+  </Step>
+
+  <Step title="Enable or disable via API">
+    Toggle plugins at runtime without restarting:
+
+    ```bash
+    # Disable a plugin
+    curl -X POST http://localhost:8000/api/plugins/toggle \
+      -H "Content-Type: application/json" \
+      -d '{"name": "MyPlugin", "enabled": false}'
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+For the full plugin development contract — including the `update()` return schema, sensor row field requirements, and type-safety rules — see the [Plugin contract API reference](/api/plugin-contract).
+</Tip>

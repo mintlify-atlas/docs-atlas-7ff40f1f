@@ -1,0 +1,212 @@
+---
+title: "WebSocket streaming: backtest replay and live data feed"
+description: "Stream bar-by-bar SMK results over WebSocket during backtest replay. Send run, step, stop, and reset commands to control playback speed and navigation."
+---
+
+The `/ws/stream` endpoint delivers the full SMK `step()` result for each bar over a persistent WebSocket connection. The frontend uses this to drive the TradingView chart, sensor panels, and execution panel in real time during backtest replay.
+
+## Endpoint
+
+```
+ws://localhost:8000/ws/stream
+```
+
+Load data first with `POST /api/load/csv` (or another data endpoint) before connecting. The pipeline must have bars loaded; otherwise `run` will complete immediately with a `done` message.
+
+## Commands
+
+The client sends JSON commands to control playback. The server processes each command and streams bar results back.
+
+### run
+
+Start streaming bars at a fixed interval.
+
+```json
+{"action": "run", "speed": 100}
+```
+
+<ParamField body="action" type="string">
+  `"run"`
+</ParamField>
+
+<ParamField body="speed" type="integer" default={100}>
+  Milliseconds to wait between bars. Use `0` or `1` for maximum speed. Common values: `100` (fast), `500` (slow), `1000` (one per second).
+</ParamField>
+
+### step
+
+Process a single bar and return its result. The stream does not continue automatically.
+
+```json
+{"action": "step"}
+```
+
+### stop
+
+Pause streaming. The cursor position is preserved. Send `run` again to resume.
+
+```json
+{"action": "stop"}
+```
+
+### reset
+
+Reset the pipeline cursor to bar 0 without reloading data. Useful for re-running a backtest from the beginning.
+
+```json
+{"action": "reset"}
+```
+
+## Server messages
+
+The server sends one JSON message per bar during `run` or `step`, plus control messages.
+
+### bar message
+
+```json
+{
+  "type": "bar",
+  "data": { /* full SMK step() result dict */ }
+}
+```
+
+The `data` field contains the complete result from `SMKPipeline.step()`. See [SMK step() result schema](/api/smk-step-result) for the full field reference.
+
+### done message
+
+Sent when the last bar has been processed.
+
+```json
+{"type": "done"}
+```
+
+### stopped message
+
+Sent immediately in response to a `stop` command.
+
+```json
+{"type": "stopped"}
+```
+
+### error message
+
+Sent if the pipeline raises an unhandled exception on a bar.
+
+```json
+{"type": "error", "message": "description of what went wrong"}
+```
+
+## Example: per-bar payload shape
+
+```json
+{
+  "type": "bar",
+  "data": {
+    "bar": {"time": 1715000000, "open": 1.09100, "high": 1.09250, "low": 1.09050, "close": 1.09200, "volume": 1250},
+    "bar_index": 42,
+    "total_bars": 300,
+    "veto": {"decision": "Proceed", "reasons": [], "trade_allowed": true},
+    "amd": {"state": "Manipulation", "prev": "Accumulation", "changed": true, "R_MASTER": false},
+    "fusion": {"p_fused": 0.74, "confidence": 0.81, "veto_active": false, "regime": "TRENDING"},
+    "mandra": {"open": true, "delta_e": 0.048, "size": 0.012, "regime_stable": true},
+    "sensors": [
+      {"id": "s01", "name": "VolatilityDecay", "score": 0.82, "active": true, "layer": "L3", "status": "ENTRAPPED"},
+      {"id": "p01", "name": "MarketRhythm", "score": 0.67, "active": true, "layer": "L3-ext", "status": "BEAT:4"}
+    ],
+    "execution": {
+      "action": "LONG",
+      "reason": "IPDA_DELIVER",
+      "is_armed": true,
+      "stop_loss_price": 1.09020,
+      "take_profit_price": 1.09450,
+      "lot_size": 0.05,
+      "kelly_size": 0.022,
+      "rr_ratio": 2.1,
+      "delta_e": 0.048
+    }
+  }
+}
+```
+
+## Client examples
+
+<CodeGroup>
+
+```javascript browser
+const ws = new WebSocket("ws://localhost:8000/ws/stream");
+
+ws.onopen = () => {
+  // Start streaming at 200ms per bar
+  ws.send(JSON.stringify({ action: "run", speed: 200 }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  if (msg.type === "bar") {
+    const { bar, sensors, veto, execution } = msg.data;
+    console.log(`Bar ${msg.data.bar_index}: trade_allowed=${veto.trade_allowed}`);
+    // Update chart, sensor bars, execution panel...
+  }
+
+  if (msg.type === "done") {
+    console.log("Backtest complete");
+    ws.close();
+  }
+};
+
+ws.onerror = (err) => console.error("WebSocket error", err);
+```
+
+```python python
+import asyncio
+import json
+import websockets
+
+async def stream_backtest():
+    uri = "ws://localhost:8000/ws/stream"
+    async with websockets.connect(uri) as ws:
+        # Start streaming at 100ms per bar
+        await ws.send(json.dumps({"action": "run", "speed": 100}))
+
+        async for raw in ws:
+            msg = json.loads(raw)
+
+            if msg["type"] == "bar":
+                d = msg["data"]
+                veto = d["veto"]["trade_allowed"]
+                amd  = d["amd"]["state"]
+                print(f"Bar {d['bar_index']:3d}  AMD={amd}  allowed={veto}")
+
+            elif msg["type"] == "done":
+                print("Replay complete")
+                break
+
+asyncio.run(stream_backtest())
+```
+
+</CodeGroup>
+
+## Stepping through bars manually
+
+<CodeGroup>
+
+```python python
+import asyncio, json, websockets
+
+async def manual_step():
+    async with websockets.connect("ws://localhost:8000/ws/stream") as ws:
+        for _ in range(5):
+            await ws.send(json.dumps({"action": "step"}))
+            msg = json.loads(await ws.recv())
+            if msg["type"] == "bar":
+                print(json.dumps(msg["data"]["veto"], indent=2))
+
+asyncio.run(manual_step())
+```
+
+</CodeGroup>
+
+<Tip>
+Use `{"action": "step"}` combined with the `/api/status` endpoint to build a debugger-style replay: step one bar, inspect the full result, then decide whether to continue.
+</Tip>

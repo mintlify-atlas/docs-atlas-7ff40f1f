@@ -1,0 +1,297 @@
+---
+title: "SMK step() result schema: the pipeline data contract"
+description: "The canonical dict returned by SMKPipeline.step() on every bar — the shared contract between the pipeline, AEGIS bridge, WebSocket feed, and frontend."
+---
+
+`SMKPipeline.step()` is the core method of the QUIMERIA-HYPERION backend. It processes one OHLCV bar through all 18 detector modules, the plugin layer, and the AEGIS bridge, then returns a single Python dict. This dict is the data contract between every consumer: the WebSocket sends it, the frontend renders it, and the AEGIS bridge reads `r['veto']['trade_allowed']` before placing any order.
+
+## Stability rules
+
+- **Adding a new key is safe.** Consumers ignore keys they do not recognise.
+- **Removing or renaming an existing key breaks the frontend.** The sensor panel, execution panel, and AMD state display all read specific key paths by name.
+- All values are plain Python types — no numpy scalars, no numpy arrays. The `_sanitize()` function enforces this before any dict leaves the pipeline.
+
+## The execution gate
+
+```python
+r["veto"]["trade_allowed"]  # bool — THE key execution gate
+```
+
+AEGIS checks this boolean before doing anything. `True` means all Ring 0 conditions are satisfied. `False` means at least one veto condition fired; `r["veto"]["reasons"]` lists which ones.
+
+## Sample result dict
+
+```json
+{
+  "bar": {
+    "time": 1715123400,
+    "open": 1.09100,
+    "high": 1.09250,
+    "low":  1.09050,
+    "close": 1.09200,
+    "volume": 1250
+  },
+  "bar_index": 42,
+  "total_bars": 300,
+
+  "dealing_range": {
+    "high": 1.09800, "low": 1.08200, "eq": 1.09000,
+    "zone": "DISCOUNT", "coherence": 0.72, "status": "ACTIVE"
+  },
+  "bias": {
+    "bias": "BULLISH", "eq": 1.09000, "zone": "DISCOUNT",
+    "coherence": 0.68, "valid": true
+  },
+  "ipda_phase": {
+    "phase": "DELIVER_BUY", "eq": 1.09000, "confidence": 0.81, "valid": true
+  },
+  "eq_cross": {
+    "zone": "DISCOUNT", "cross": false, "direction": "UP", "confidence": 0.55
+  },
+  "session": {
+    "active": true, "name": "LONDON", "killzone": true, "score": 0.9, "status": "KZ_ACTIVE"
+  },
+  "swings": {
+    "count": 4,
+    "nodes": [
+      {"idx": 38, "price": 1.09050, "type": "LOW"},
+      {"idx": 40, "price": 1.09220, "type": "HIGH"}
+    ]
+  },
+  "fvg": {
+    "count": 2, "active": 1,
+    "recent": [{"type": "BULL", "top": 1.09150, "bot": 1.09100, "eq": 1.09125}]
+  },
+  "ob": {
+    "count": 1, "active": 1,
+    "recent": [{"type": "BULL", "level": 1.09080, "high": 1.09120, "low": 1.09040, "score": 0.77}]
+  },
+  "vol_profile": {
+    "zones": 5,
+    "hvn": [{"price": 1.09100, "density": 0.85}, {"price": 1.08900, "density": 0.61}]
+  },
+  "vol_decay": {
+    "ratio": 0.63, "entrapped": true, "energy": 0.82, "stasis": 3, "status": "ENTRAPPED"
+  },
+  "displacement": {
+    "is_disp": false, "dir": "NONE", "body_ratio": 0.41, "range_mult": 0.9,
+    "vetoed": false, "status": "CALM"
+  },
+  "harmonic": {
+    "phase_diff": 0.41, "inverted": false, "freq": 8.2, "trap": false, "status": "HARMONIC"
+  },
+  "expansion": {
+    "sigma": 1.2, "prob": 0.73, "entrapped": false, "target": 1.09380, "status": "EXPANDING"
+  },
+  "manipulation": {
+    "active": false, "score": 0.21, "level": 1.09050, "wick": 0.0003, "status": "CLEAN"
+  },
+  "kl": {
+    "score": 0.44, "stable": true, "h_curr": 0.51, "h_ref": 0.48, "status": "STABLE"
+  },
+  "topology": {
+    "h1_score": 0.12, "fractured": false, "islands": 0, "status": "INTACT"
+  },
+  "amd": {
+    "state": "Manipulation", "prev": "Accumulation", "changed": true, "R_MASTER": false
+  },
+  "fusion": {
+    "p_fused": 0.74, "confidence": 0.81, "veto_active": false,
+    "active_lambdas": ["λ1", "λ3", "λ5"], "regime": "TRENDING", "status": "PROCEED"
+  },
+  "mandra": {
+    "open": true, "delta_e": 0.048, "size": 0.012, "regime_stable": true, "status": "OPEN"
+  },
+  "veto": {
+    "decision": "Proceed", "reasons": [], "trade_allowed": true
+  },
+  "gmos": {
+    "execute": true, "action": "EXECUTE", "p_fused": 0.74, "coherence": 0.79,
+    "hamiltonian": 0.31, "regime_stable": true, "drawdown": 0.008,
+    "phase": 1, "available": true
+  },
+  "sensors": [
+    {"id": "s01", "name": "VolatilityDecay", "score": 0.82, "active": true, "layer": "L3", "status": "ENTRAPPED"},
+    {"id": "s02", "name": "Displacement",    "score": 0.14, "active": false, "layer": "L3", "status": "CALM"},
+    {"id": "p01", "name": "MarketRhythm",    "score": 0.67, "active": true,  "layer": "L3-ext", "status": "BEAT:4"}
+  ],
+  "plugins": {
+    "MarketRhythm": {"tempo": 4.1, "harmony": true, "fingerprint": "a3f2b1", "active": true, "score": 0.67, "status": "BEAT:4"},
+    "MarketHeuristic": {"wick_score": 0.2, "vol_spike": false, "entropy": 0.41, "active": false, "score": 0.2, "status": "IDLE"}
+  },
+  "execution": {
+    "action": "LONG",
+    "reason": "IPDA_DELIVER",
+    "is_armed": true,
+    "pattern": "BWBUI",
+    "dominant": "B",
+    "direction": "BUY",
+    "stop_loss_price": 1.09020,
+    "take_profit_price": 1.09450,
+    "lot_size": 0.05,
+    "kelly_size": 0.022,
+    "venue_allocation": [{"venue": "paper", "fraction": 1.0}],
+    "risk_pips": 18,
+    "rr_ratio": 2.1,
+    "delta_e": 0.048,
+    "rev_score": 0.12,
+    "risk_profile": "MODERATE"
+  }
+}
+```
+
+## Field reference
+
+### Top-level envelope
+
+<ResponseField name="bar" type="object">
+  The current OHLCV bar.
+
+  <Expandable title="Bar fields">
+    <ResponseField name="time" type="integer">Unix timestamp (seconds).</ResponseField>
+    <ResponseField name="open" type="number">Open price.</ResponseField>
+    <ResponseField name="high" type="number">High price.</ResponseField>
+    <ResponseField name="low" type="number">Low price.</ResponseField>
+    <ResponseField name="close" type="number">Close price.</ResponseField>
+    <ResponseField name="volume" type="number">Volume.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="bar_index" type="integer">
+  0-based index of this bar in the loaded dataset.
+</ResponseField>
+
+<ResponseField name="total_bars" type="integer">
+  Total bars in the current dataset.
+</ResponseField>
+
+---
+
+### veto — the execution gate
+
+<ResponseField name="veto" type="object">
+  Ring 0 veto decision. **This is the canonical execution gate.**
+
+  <Expandable title="Veto fields">
+    <ResponseField name="decision" type="string">
+      `"Proceed"` or `"Halt"`.
+    </ResponseField>
+    <ResponseField name="reasons" type="array">
+      List of veto reason codes, for example `["MANDRA:DE<0", "CONF:INSUFFICIENT"]`. Empty when proceeding.
+    </ResponseField>
+    <ResponseField name="trade_allowed" type="boolean">
+      `true` when all Ring 0 conditions are satisfied and AEGIS may act. `false` on any veto.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### sensors — the frontend sensor panel
+
+<ResponseField name="sensors" type="array">
+  List of sensor rows rendered in the frontend. Contains 14 SMK sensor rows followed by one row per loaded plugin. Order is stable within a session.
+
+  <Expandable title="Sensor row fields">
+    <ResponseField name="id" type="string">
+      Sensor identifier, for example `"s01"` (SMK) or `"p01"` (plugin).
+    </ResponseField>
+    <ResponseField name="name" type="string">
+      Display name, truncated to 14 characters.
+    </ResponseField>
+    <ResponseField name="score" type="number">
+      Normalized score, 0.0–1.0.
+    </ResponseField>
+    <ResponseField name="active" type="boolean">
+      Whether the sensor detected its condition this bar.
+    </ResponseField>
+    <ResponseField name="layer" type="string">
+      Layer classification: `"L1"`, `"L2"`, `"L3"`, `"L4"`, `"L3-ext"`, `"L2-ext"`.
+    </ResponseField>
+    <ResponseField name="status" type="string">
+      Short status string for the tooltip.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### execution — AEGIS output
+
+<ResponseField name="execution" type="object">
+  Output from the AEGIS bridge. Only populated on PROCEED bars when the bridge is available.
+
+  <Expandable title="Execution fields">
+    <ResponseField name="action" type="string">
+      `"LONG"`, `"SHORT"`, `"VETO"`, or `"FLAT"`.
+    </ResponseField>
+    <ResponseField name="reason" type="string">
+      Human-readable signal reason, for example `"IPDA_DELIVER"`.
+    </ResponseField>
+    <ResponseField name="is_armed" type="boolean">
+      `true` when the bridge is fully wired and ready to route a real order.
+    </ResponseField>
+    <ResponseField name="pattern" type="string">
+      CLM sequence of the last 8 bars, for example `"BWBUIDB"`.
+    </ResponseField>
+    <ResponseField name="stop_loss_price" type="number">
+      Computed stop-loss price level.
+    </ResponseField>
+    <ResponseField name="take_profit_price" type="number">
+      Computed take-profit price level.
+    </ResponseField>
+    <ResponseField name="lot_size" type="number">
+      Raw lot size from SequenceStopLossManager.
+    </ResponseField>
+    <ResponseField name="kelly_size" type="number">
+      Kelly-adjusted position size from AegisExtensions.
+    </ResponseField>
+    <ResponseField name="venue_allocation" type="array">
+      List of `{venue, fraction}` objects from SchurRouter.
+    </ResponseField>
+    <ResponseField name="rr_ratio" type="number">
+      Risk-to-reward ratio for this trade setup.
+    </ResponseField>
+    <ResponseField name="delta_e" type="number">
+      Mandra information energy gain for this bar.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### amd, fusion, mandra
+
+<ResponseField name="amd" type="object">
+  AMD state machine output.
+
+  <Expandable title="AMD fields">
+    <ResponseField name="state" type="string">`"Accumulation"`, `"Manipulation"`, `"Distribution"`, or `"Retracement"`.</ResponseField>
+    <ResponseField name="prev" type="string">Previous AMD state.</ResponseField>
+    <ResponseField name="changed" type="boolean">`true` if the state transitioned this bar.</ResponseField>
+    <ResponseField name="R_MASTER" type="boolean">`true` when KL fracture + topology fracture force a hard reset to Accumulation.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="fusion" type="object">
+  Lambda fusion engine output (Ring 0 OBNFE).
+
+  <Expandable title="Fusion fields">
+    <ResponseField name="p_fused" type="number">Fused probability signal, 0.0–1.0.</ResponseField>
+    <ResponseField name="confidence" type="number">Overall fusion confidence, 0.0–1.0.</ResponseField>
+    <ResponseField name="veto_active" type="boolean">`true` when the fusion engine itself issued a hard veto.</ResponseField>
+    <ResponseField name="active_lambdas" type="array">List of lambda sensor names that contributed to this bar's fusion.</ResponseField>
+    <ResponseField name="regime" type="string">`"TRENDING"`, `"RANGING"`, or `"VOLATILE"`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="mandra" type="object">
+  Mandra Gate output (information energy gate).
+
+  <Expandable title="Mandra fields">
+    <ResponseField name="open" type="boolean">`true` when ΔE ≥ 0.02 and the gate allows passage.</ResponseField>
+    <ResponseField name="delta_e" type="number">Information energy gain this bar. Must be > 0.02 to pass the gate.</ResponseField>
+    <ResponseField name="size" type="number">Mandra kernel size (position sizing factor).</ResponseField>
+    <ResponseField name="regime_stable" type="boolean">`true` when the HMM regime is stable (state 1 or 2).</ResponseField>
+  </Expandable>
+</ResponseField>

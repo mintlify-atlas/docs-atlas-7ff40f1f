@@ -1,0 +1,263 @@
+---
+title: "Load market data: CSV, Bitget, OANDA, and samples"
+description: "Connect QUIMERIA-HYPERION to historical and live market data via CSV uploads, Bitget and OANDA REST APIs, or the built-in synthetic AMD cycle sample."
+---
+
+Every data source in QUIMERIA-HYPERION is normalized by `backend/data_connectors.py` into a single canonical OHLCV format before entering the SMK pipeline. This means you can switch between a CSV file exported from MetaTrader and a live Bitget REST feed without changing any pipeline configuration.
+
+## Normalized OHLCV format
+
+All loaders return a JSON array of bar objects. Timestamps are Unix seconds (UTC). Volume falls back to `100` if the source does not provide it.
+
+```json
+[
+  {
+    "time":   1705276800,
+    "open":   1.10512,
+    "high":   1.10601,
+    "low":    1.10488,
+    "close":  1.10557,
+    "volume": 1245.0
+  }
+]
+```
+
+<Note>
+  The pipeline calls `_normalize_bars()` on every dataset and deduplicates bars by timestamp before loading. Bars are always sorted ascending by `time`.
+</Note>
+
+## Data sources overview
+
+| Source | Format | Endpoint |
+|--------|--------|----------|
+| MT4/MT5 CSV export | Dot-separated date with optional TICKVOL/SPREAD columns | `POST /api/load/csv` |
+| TradingView ISO export | ISO 8601 timestamp (`2024-01-15T00:00:00+00:00`) | `POST /api/load/csv` |
+| TradingView US export | US date format (`01/15/2024 00:00`) | `POST /api/load/csv` |
+| Dukascopy UTC format | `DD.MM.YYYY HH:MM:SS.mmm UTC` | `POST /api/load/csv` |
+| Bitget REST API | Spot candle endpoint, auto-paged | `POST /api/load/bitget` |
+| OANDA REST API | Granularity-based candle fetch | `POST /api/load/oanda` |
+| Built-in sample | Synthetic 500-bar AMD cycle | `POST /api/load/sample` |
+
+---
+
+## CSV uploads
+
+The `/api/load/csv` endpoint accepts any of the four supported CSV dialects. The format detector reads the header line and first data row to pick the correct parser automatically.
+
+### MT4 / MT5 format
+
+MT4 exports use a dot-separated date (`2024.01.15`) and separate `DATE` and `TIME` columns. MT5 adds `TICKVOL`, `VOL`, and `SPREAD` columns — all are accepted and the volume field is mapped to `tickvol` or `vol` whichever is present.
+
+```
+<DATE>,<TIME>,<OPEN>,<HIGH>,<LOW>,<CLOSE>,<VOL>
+2024.01.15,00:00,1.10512,1.10601,1.10488,1.10557,1245
+```
+
+```
+DATE,TIME,OPEN,HIGH,LOW,CLOSE,TICKVOL,VOL,SPREAD
+2024.01.15,00:00:00,1.10512,1.10601,1.10488,1.10557,1245,0,2
+```
+
+### TradingView ISO format
+
+TradingView's ISO export uses a single `time` column with a full ISO 8601 timestamp including timezone offset.
+
+```
+time,open,high,low,close,volume
+2024-01-15T00:00:00+00:00,1.10512,1.10601,1.10488,1.10557,1245
+```
+
+### TradingView US format
+
+TradingView's US date export uses `DATE` and `TIME` as separate columns with MM/DD/YYYY date notation.
+
+```
+DATE,TIME,OPEN,HIGH,LOW,CLOSE,VOLUME
+01/15/2024,00:00,1.10512,1.10601,1.10488,1.10557,1245
+```
+
+### Dukascopy UTC format
+
+Dukascopy exports combine date, time, and milliseconds into a single `UTC` column.
+
+```
+UTC,OPEN,HIGH,LOW,CLOSE,VOLUME
+19.03.2026 12:00:00.000 UTC,1.10512,1.10601,1.10488,1.10557,1245
+```
+
+### Uploading a CSV file
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    curl -X POST http://localhost:8000/api/load/csv \
+      -F "file=@/path/to/EURUSD_H1.csv"
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    with open("EURUSD_H1.csv", "rb") as f:
+        r = httpx.post(
+            "http://localhost:8000/api/load/csv",
+            files={"file": ("EURUSD_H1.csv", f, "text/csv")},
+        )
+    print(r.json())
+    # {"bars": 2340, "symbol": "EURUSD", "status": "ok"}
+    ```
+  </Tab>
+</Tabs>
+
+### Column name aliases
+
+The normalizer accepts multiple column name variants for each OHLCV field:
+
+| Field | Accepted column names |
+|-------|-----------------------|
+| `time` | `time`, `timestamp`, `UTC`, `datetime`, `date`, `Datetime`, `Date` |
+| `open` | `open`, `Open`, `o`, `OPEN` |
+| `high` | `high`, `High`, `h`, `HIGH` |
+| `low` | `low`, `Low`, `l`, `LOW` |
+| `close` | `close`, `Close`, `c`, `CLOSE` |
+| `volume` | `volume`, `Volume`, `tickvol`, `TickVol`, `vol`, `VOL`, `v` |
+
+---
+
+## Bitget REST API
+
+The `/api/load/bitget` endpoint fetches historical candles from the Bitget v2 spot market API. The granularity maps to Bitget's internal interval strings automatically.
+
+| Interval | Bitget string |
+|----------|--------------|
+| `1m` | `1min` |
+| `3m` | `3min` |
+| `5m` | `5min` |
+| `15m` | `15min` |
+| `1h` | `1H` |
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    curl -X POST http://localhost:8000/api/load/bitget \
+      -H "Content-Type: application/json" \
+      -d '{
+        "symbol": "EURUSDT",
+        "granularity": "1h",
+        "limit": 500
+      }'
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    r = httpx.post(
+        "http://localhost:8000/api/load/bitget",
+        json={
+            "symbol":      "EURUSDT",
+            "granularity": "1h",
+            "limit":       500,
+        },
+    )
+    data = r.json()
+    print(f"Loaded {data['bars']} bars")
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Public Bitget candle endpoints do not require an API key. Set `BITGET_API_KEY` in your `.env` file if you need access to private endpoints or higher rate limits.
+</Note>
+
+---
+
+## OANDA REST API
+
+The `/api/load/oanda` endpoint fetches candles from the OANDA v20 REST API using your account credentials. The `granularity` parameter maps directly to OANDA's granularity strings (e.g., `H1`, `M15`, `D`).
+
+<Warning>
+  OANDA requires a live or practice account API token. Never commit your token to version control — store it as `OANDA_API_KEY` in your `.env` file.
+</Warning>
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    curl -X POST http://localhost:8000/api/load/oanda \
+      -H "Content-Type: application/json" \
+      -d '{
+        "instrument": "EUR_USD",
+        "granularity": "H1",
+        "count": 500,
+        "api_key": "YOUR_OANDA_TOKEN",
+        "account_type": "practice"
+      }'
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx, os
+
+    r = httpx.post(
+        "http://localhost:8000/api/load/oanda",
+        json={
+            "instrument":   "EUR_USD",
+            "granularity":  "H1",
+            "count":        500,
+            "api_key":      os.environ["OANDA_API_KEY"],
+            "account_type": "practice",   # or "live"
+        },
+    )
+    print(r.json())
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Built-in sample data
+
+The `/api/load/sample` endpoint generates a synthetic 500-bar AMD (Accumulate → Manipulate → Distribute → Retrace) price cycle. It requires no credentials and is useful for verifying your pipeline configuration before connecting a live feed.
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    curl -X POST http://localhost:8000/api/load/sample
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    r = httpx.post("http://localhost:8000/api/load/sample")
+    data = r.json()
+    print(f"Sample loaded: {data['bars']} bars")
+    # Sample loaded: 500 bars
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  Use the sample data source when first deploying QUIMERIA-HYPERION to confirm that all 18 SMK detector modules load correctly and the dashboard renders the sensor panel before you connect real market data.
+</Tip>
+
+---
+
+## Verifying a loaded dataset
+
+After any successful load, call `GET /api/status` to confirm the bar count, symbol, and pipeline state:
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+```json
+{
+  "status": "ready",
+  "bars_loaded": 500,
+  "symbol": "EURUSD",
+  "pipeline": "initialized",
+  "modules_ok": 18,
+  "import_errors": 0
+}
+```

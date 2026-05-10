@@ -1,0 +1,220 @@
+---
+title: "Build custom SMK plugins: the full SMKPlugin contract"
+description: "Create custom forensic detectors for the QUIMERIA-HYPERION plugin layer. Extend SMKPlugin, implement update(), register in PLUGIN_REGISTRY, and restart."
+---
+
+The plugin layer runs after all 18 core SMK modules on every bar. Plugins append extra sensor rows to `r['sensors']` and store their full telemetry in `r['plugins']`. The base class, registry, and lifecycle are designed to keep the server stable — a failing plugin never crashes the pipeline.
+
+## How it works
+
+On every call to `SMKPipeline.step()`, after all internal detectors have run, the `PluginManager` iterates over the plugin registry. Each enabled plugin receives the current bar dict, a rolling window DataFrame, and the partially assembled SMK result. The plugin's `update()` method returns a flat telemetry dict; the manager appends a sensor row derived from that dict to `r['sensors']`.
+
+## Creating a plugin
+
+<Steps>
+  <Step title="Create the plugin file">
+    Create a new Python file in `backend/plugins/`. The filename becomes the module path used in the registry.
+
+    ```
+    backend/plugins/my_plugin.py
+    ```
+  </Step>
+
+  <Step title="Extend SMKPlugin">
+    Import and subclass `SMKPlugin` from `plugins` (the `backend/plugins/__init__.py` package). Set the required class attributes and implement `update()`.
+
+    ```python
+    # backend/plugins/my_plugin.py
+    from __future__ import annotations
+    import pandas as pd
+    from plugins import SMKPlugin
+
+
+    class MyPlugin(SMKPlugin):
+        name            = "MyPlugin"        # shown in the frontend sensor bar
+        layer           = "L3-ext"          # L1, L2, L3, L4, L3-ext, L2-ext, EXE
+        sensor_id       = "p07"             # unique ID shown in the sensor panel
+        requires_warmup = 30                # bars before update() is called
+
+        def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+            """
+            Called once per bar after the warmup period.
+
+            bar  — current OHLCV dict: {time, open, high, low, close, volume}
+            df   — rolling window DataFrame, up to 60 bars
+            smk  — SMK result dict so far (read-only); earlier layers are complete
+            """
+            close = df["close"].values
+            delta = float(close[-1] - close[-2]) if len(close) > 1 else 0.0
+            active = abs(delta) > 0.0005   # threshold: 5 pips
+
+            return {
+                "active": active,          # bool — required
+                "score":  min(abs(delta) / 0.001, 1.0),  # float 0–1 — required
+                "status": "ACTIVE" if active else "IDLE", # str — required
+                "delta":  round(delta, 6), # any extra plain-Python fields
+            }
+    ```
+  </Step>
+
+  <Step title="Register in PLUGIN_REGISTRY">
+    Add a `(module_path, class_name)` tuple to the `PLUGIN_REGISTRY` list in `backend/plugin_manager.py`.
+
+    ```python
+    # backend/plugin_manager.py
+    PLUGIN_REGISTRY = [
+        ("plugins.market_rhythm",    "MarketRhythmPlugin"),
+        ("plugins.market_heuristic", "MarketHeuristicPlugin"),
+        # ... existing plugins ...
+        ("plugins.my_plugin",        "MyPlugin"),   # add this line
+    ]
+    ```
+  </Step>
+
+  <Step title="Restart the server">
+    The plugin manager calls `load_all()` at startup. Stop and restart the uvicorn process to pick up the new plugin.
+
+    ```bash
+    cd backend
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ```
+
+    Verify the plugin loaded:
+
+    ```bash
+    curl http://localhost:8000/api/plugins
+    ```
+  </Step>
+</Steps>
+
+## The SMKPlugin base class
+
+```python
+# backend/plugins/__init__.py
+
+class SMKPlugin(ABC):
+    name:            str  = "unnamed"
+    layer:           str  = "L3-ext"   # L1 | L2 | L3 | L4 | λ-ext | EXE
+    sensor_id:       str  = "s99"      # shown in frontend sensor bar
+    enabled:         bool = True
+    requires_warmup: int  = 20         # minimum bars before firing
+
+    def on_bar(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+        """Called by plugin_manager on every bar. Handles warmup internally."""
+        self._bar_count += 1
+        if self._bar_count < self.requires_warmup:
+            return {"status": "WARMUP", "active": False, "score": 0.0}
+        self._ready = True
+        try:
+            return self.update(bar, df, smk)
+        except Exception as e:
+            return {"status": f"ERROR:{e}", "active": False, "score": 0.0}
+
+    @abstractmethod
+    def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+        """Implement this method. Return a flat dict of plain Python types."""
+        ...
+
+    def reset(self):
+        """Called when the pipeline reloads data. Resets warmup counter."""
+        self._bar_count = 0
+        self._ready     = False
+```
+
+## Required return fields
+
+Every dict returned by `update()` must include these three keys:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `active` | `bool` | Whether the plugin detected its condition this bar |
+| `score` | `float` | Normalized score in the range 0.0–1.0 |
+| `status` | `str` | Short status string shown in the frontend tooltip |
+
+Additional keys are permitted and will be stored in `r['plugins'][plugin.name]` for downstream use.
+
+<Warning>
+All values returned from `update()` must be plain Python types: `bool`, `int`, `float`, `str`, `list`, or `dict`. Never return numpy scalars (`np.float64`, `np.bool_`, etc.) or numpy arrays. The WebSocket serializer will raise a `TypeError` on any unwrapped numpy type.
+
+To convert: use `float(np_value)`, `int(np_value)`, `bool(np_value)`, or `.tolist()` on arrays.
+</Warning>
+
+## Accessing the SMK result
+
+The `smk` argument passed to `update()` is the partially assembled step result. Layers that have already run are available; layers that run after the plugin are not. The plugin layer runs after all 18 core detectors, so the full result including `veto`, `fusion`, and `mandra` is available.
+
+```python
+def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+    # Read the veto decision
+    trade_allowed = smk.get("veto", {}).get("trade_allowed", True)
+
+    # Read the AMD state
+    amd_state = smk.get("amd", {}).get("state", "Accumulation")
+
+    # Read the fusion confidence
+    confidence = smk.get("fusion", {}).get("confidence", 0.0)
+
+    return {
+        "active": trade_allowed and confidence > 0.6,
+        "score":  confidence,
+        "status": f"AMD:{amd_state}",
+    }
+```
+
+## Complete minimal example
+
+```python
+# backend/plugins/momentum_plugin.py
+"""
+Simple momentum plugin — detects when the last bar body exceeds 1.5× ATR.
+"""
+from __future__ import annotations
+import numpy as np
+import pandas as pd
+from plugins import SMKPlugin
+
+
+class MomentumPlugin(SMKPlugin):
+    name            = "Momentum"
+    layer           = "L3-ext"
+    sensor_id       = "p08"
+    requires_warmup = 20
+
+    def update(self, bar: dict, df: pd.DataFrame, smk: dict) -> dict:
+        closes = df["close"].values
+        highs  = df["high"].values
+        lows   = df["low"].values
+
+        # ATR (14-period)
+        atr_window = min(14, len(closes) - 1)
+        tr = np.maximum(
+            highs[1:] - lows[1:],
+            np.maximum(
+                np.abs(highs[1:] - closes[:-1]),
+                np.abs(lows[1:]  - closes[:-1]),
+            ),
+        )
+        atr = float(np.mean(tr[-atr_window:]))
+
+        # Current bar body
+        body = abs(float(closes[-1]) - float(bar["open"]))
+        ratio = body / max(atr, 1e-9)
+        active = ratio > 1.5
+
+        return {
+            "active":     active,
+            "score":      float(min(ratio / 3.0, 1.0)),
+            "status":     f"BURST:{ratio:.1f}x" if active else "CALM",
+            "body_ratio": round(ratio, 3),
+            "atr":        round(atr, 6),
+        }
+```
+
+## Auto-discovery behaviour
+
+The `PluginManager` singleton is instantiated once at server startup via `get_plugin_manager()`. It calls `load_all()`, which iterates `PLUGIN_REGISTRY` in order. If a plugin fails to import (missing dependency, syntax error), the error is recorded in `mgr.load_errors` and the plugin is skipped — the server continues normally. Check plugin load errors with:
+
+```bash
+curl http://localhost:8000/api/plugins
+# Look at the "errors" key in the response
+```

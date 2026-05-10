@@ -1,0 +1,185 @@
+---
+title: "IPDA Structural Compiler: dealing ranges and AMD"
+description: "How the IPDA Structural Compiler decodes the Interbank Price Delivery Algorithm through AMD state machines, dealing ranges, and Layer 2 memory imbalances."
+---
+
+The IPDA Structural Compiler is Layer 1 of the Sovereign Market Kernel. It treats every price chart as the output of a deterministic **Interbank Price Delivery Algorithm (IPDA)** — the sequence of institutional price delivery steps that major banks use to move liquidity from accumulation zones to distribution targets. By decoding that sequence in real time, the compiler provides the structural context that every upstream sensor and veto guard depends on.
+
+## IPDA philosophy
+
+Traditional technical analysis assumes markets are driven by supply and demand from many independent actors. IPDA inverts this assumption: central bank–adjacent institutions control liquidity delivery through a repeatable algorithm. Price moves between pre-defined **dealing ranges** (20, 40, and 60-day nodes) and visits **draw-on-liquidity (DOL)** targets at external range liquidity highs and lows before reversing.
+
+The implication is that price is not random between candles — it follows a delivery schedule. The compiler's job is to identify where in that schedule the market currently sits.
+
+## AMD state machine
+
+The AMD cycle is the core behavioral model. Every significant price move passes through four sequential states:
+
+```
+Accumulate → Manipulate → Distribute → Retrace
+```
+
+<AccordionGroup>
+  <Accordion title="Accumulate (σ_t = 0)">
+    Price consolidates inside a dealing range. Volatility decays (λ₁ triggers). Institutional orders are placed without alerting retail participants. The expansion predictor assigns `sigma_t = 0` and monitors the λ₁ volatility ratio.
+
+    ```python
+    # expansion_predictor.py — state assignment
+    current_state = 0  # ACCUMULATION
+    if p_amp > 0.6 or has_displacement:
+        current_state = 2  # EXPANSION/DISTRIBUTION
+    elif is_entrapped:
+        status = "PHASE_ENTRAPMENT_λ1"
+    ```
+  </Accordion>
+
+  <Accordion title="Manipulate (σ_t = 1)">
+    Price sweeps liquidity beyond the previous range high or low — the **Judas Swing**. Stop orders are triggered, retail traders enter in the wrong direction, and the manipulation detector fires. The `ManipulationPhaseDetector` scores wicks, volume anomalies, and IPDA range touches to assign a confidence score ≥ 70.
+  </Accordion>
+
+  <Accordion title="Distribute (σ_t = 2)">
+    Institutional orders are filled against the retail crowd's trapped positions. Price displaces aggressively in the true direction. The `IPDAExpansionPredictor` assigns `sigma_t = 2` and sets the DOL target at the H60 or L60 external range liquidity level.
+
+    ```python
+    # expansion_predictor.py — DOL targeting
+    target = magnets.get('H60') if last_candle['close'] > magnets.get('EQ') \
+              else magnets.get('L60')
+    ```
+  </Accordion>
+
+  <Accordion title="Retrace">
+    Price pulls back to fill imbalances left behind during the distribution leg. Layer 2 FVG and Order Block detectors mark the precise re-entry zones. The IPDA phase classifier identifies this as a Retracement phase.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+The AMD cycle is fractal. It plays out across the 20-day, 40-day, and 60-day dealing ranges simultaneously. A retrace on the H1 timeframe may be the accumulation leg of the daily AMD cycle.
+</Note>
+
+## Dealing range detection
+
+The compiler tracks three range nodes. Each node defines a set of structural highs and lows that act as liquidity magnets.
+
+| Range | Lookback | Key levels | Role |
+|-------|----------|------------|------|
+| Short-term | 20-day | H20, L20 | Near-term manipulation targets |
+| Medium-term | 40-day | H40, L40 | Intermediate DOL objectives |
+| Long-term | 60-day | H60, L60 | Primary distribution targets (ERL) |
+
+The `ManipulationPhaseDetector` uses all three simultaneously:
+
+```python
+# manipulation_detector.py — IPDA range synchronization
+def _calculate_ipda_ranges(self, df: pd.DataFrame) -> Dict:
+    """Synchronizes 20, 40, and 60-day lookback nodes"""
+    ranges = {}
+    for lb in self.lookbacks:  # [20, 40, 60]
+        ranges[f'H{lb}'] = df['high'].tail(lb).max()
+        ranges[f'L{lb}'] = df['low'].tail(lb).min()
+    return ranges
+```
+
+A score of 40 is added when price touches any H/L node. Combined with the wick signature (score +30) and volume anomaly (score +30), a total ≥ 70 constitutes a confirmed manipulation event.
+
+## Premium, discount, and equilibrium
+
+Within any dealing range, the compiler classifies the current price relative to the range midpoint (equilibrium):
+
+- **Premium zone** — price is above equilibrium. Institutional sellers distribute here. Retail longs are at maximum risk.
+- **Equilibrium (EQ)** — the 50% midpoint of the range. A closing cross of equilibrium confirms bias direction.
+- **Discount zone** — price is below equilibrium. Institutional buyers accumulate here. Retail shorts are trapped.
+
+The `EquilibriumCrossDetector` monitors real-time closes against the EQ level and issues a bias confirmation or bias flip signal to Layer 3 sensors.
+
+<Tip>
+The highest-conviction trades enter in discount zones (long) or premium zones (short) after a confirmed AMD manipulation sweep followed by a displacement candle. Never buy premium; never sell discount.
+</Tip>
+
+## IPDA phases
+
+The `IPDAPhaseDetector` classifies the current structural state into one of four phases. These phases inform which λ sensors are weighted most heavily in the fusion engine.
+
+| Phase | Description | Primary sensors active |
+|-------|-------------|----------------------|
+| Consolidation | Low volatility, AMD accumulation in progress | λ₁, λ₂ |
+| Expansion | Displacement underway, DOL delivery active | λ₅, λ₄ |
+| Retracement | Post-expansion pullback to FVG / OB | λ₃, λ₆ |
+| Reversal | Full AMD cycle completion, new range forming | λ₇, λ₈ |
+
+## Layer 2: FVG detector
+
+Fair Value Gaps are structural voids created when price moves too fast for opposing orders to fill. They represent unfilled institutional orders that price will eventually return to deliver.
+
+The `FVGDetectorEngine` uses a three-candle sequence validation: a bullish FVG exists when the low of candle `i` is above the high of candle `i-2`, leaving a gap around the middle candle.
+
+```python
+# fvg_detector_engine.py — gap detection logic
+for i in range(2, len(df)):
+    # Bullish FVG: upward vacuum between candle[i-2] high and candle[i] low
+    if lows[i] > (highs[i-2] + self.sensitivity):
+        detected_gaps.append(FVGTelemetry(
+            gap_type="BULLISH_FVG",
+            top_boundary=float(lows[i]),
+            bottom_boundary=float(highs[i-2]),
+            equilibrium=float((lows[i] + highs[i-2]) / 2),
+            timestamp=times[i-1]
+        ))
+
+    # Bearish FVG: downward vacuum between candle[i-2] low and candle[i] high
+    elif highs[i] < (lows[i-2] - self.sensitivity):
+        detected_gaps.append(FVGTelemetry(
+            gap_type="BEARISH_FVG",
+            top_boundary=float(lows[i-2]),
+            bottom_boundary=float(highs[i]),
+            equilibrium=float((lows[i-2] + highs[i]) / 2),
+            timestamp=times[i-1]
+        ))
+```
+
+Each `FVGTelemetry` record exposes:
+- `gap_type` — `BULLISH_FVG` or `BEARISH_FVG`
+- `top_boundary` / `bottom_boundary` — the precise price levels of the gap
+- `equilibrium` — the 50% "fair value" reentry point within the gap
+
+## Layer 2: Order block detector
+
+Order blocks are the origin candles immediately before a major displacement move. They mark price levels where institutional orders were initially placed and where price will return to pick up remaining orders.
+
+```python
+# order_block_detector.py — bullish order block formation
+# Condition: bearish origin candle, followed by bullish displacement candle
+if origin_candle['close'] < origin_candle['open']:
+    if displacement_candle['close'] > displacement_candle['open']:
+        if self.analyze_displacement(displacement_candle, atr):
+            blocks.append(OrderBlockTelemetry(
+                ob_type="BULLISH_OB",
+                price_level=origin_candle['open'],
+                high_boundary=origin_candle['high'],
+                ...
+            ))
+```
+
+The `analyze_displacement` method validates the qualifying displacement candle against two conditions:
+
+```python
+# order_block_detector.py — λ6 displacement validation
+def analyze_displacement(self, candle: dict, atr: float) -> bool:
+    c_range = candle['high'] - candle['low']
+    body = abs(candle['close'] - candle['open'])
+    body_ratio = body / (c_range + 1e-9)
+
+    has_range = c_range > (self.k * atr)       # Range > 1.2 × ATR₂₀
+    has_body  = body_ratio >= self.body_min     # Body ≥ 75% of range
+    return has_range and has_body
+```
+
+Each `OrderBlockTelemetry` record includes an `is_mitigated` flag that tracks whether price has already returned to the block. Mitigated blocks are no longer valid re-entry targets.
+
+<CardGroup cols={2}>
+  <Card title="Lambda sensors" icon="wave-sine" href="/modules/lambda-sensors">
+    Layer 3 sensors that consume IPDA structural context
+  </Card>
+  <Card title="Ring 0 veto" icon="shield-halved" href="/modules/ring-0-veto">
+    Hard-stop guards that protect the execution layer
+  </Card>
+</CardGroup>

@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "QUIMERIA-HYPERION",
+  "projectType": "ai-ml",
+  "projectName": "QUIMERIA-HYPERION",
+  "projectDescription": "The Sovereign Market Kernel (SMK) — an institutional-grade algorithmic trading platform that fuses IPDA structural analysis, Bayesian regime detection, spectral harmonic forensics, and FAISS-powered pattern memory into a unified multi-layered intelligence stack.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#0F4C75",
-    "light": "#1B7FC4",
-    "dark": "#091F30"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/deskiziarecords/QUIMERIA-HYPERION"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/deskiziarecords/QUIMERIA-HYPERION"
-    }
-  },
+  "primaryColor": "#0F4C75",
+  "lightColor": "#1B7FC4",
+  "darkColor": "#091F30",
   "navigation": {
     "tabs": [
       {
@@ -97,5 +85,40 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Multi-layered Sovereign Market Kernel (SMK) with Ring -1 to Ring 0 veto architecture",
+    "8 Lambda sensors (λ₁–λ₈) for real-time market state detection",
+    "IPDA structural analysis: Accumulate → Manipulate → Distribute → Retrace cycle",
+    "Bayesian HMM regime tracker with Hamiltonian energy measurement",
+    "FAISS-powered pattern memory for historical similarity matching",
+    "6 forensic plugins: Market Rhythm, Heuristic, Vision, Seismology, File Carving, Signature Scan",
+    "FastAPI + WebSocket backend with TradingView Lightweight Charts frontend",
+    "Multi-exchange support: MetaTrader 5, Bitget, OANDA, Fyers, Coinbase",
+    "Ring 0 hard-veto conditions: topological fracture, KL divergence, Mandra energy gate",
+    "AEGIS execution bridge with dynamic stop-loss management"
+  ],
+  "publicApiSurface": [
+    "POST /api/load/csv",
+    "POST /api/load/bitget",
+    "POST /api/load/oanda",
+    "POST /api/load/sample",
+    "POST /api/config/modules",
+    "POST /api/live/start",
+    "POST /api/live/stop",
+    "GET /api/status",
+    "GET /api/logs",
+    "GET /api/logs/{filename}",
+    "GET /api/plugins",
+    "POST /api/plugins/toggle",
+    "GET /api/execution/status",
+    "GET /api/execution/stats",
+    "WS /ws/stream",
+    "WS /ws/live",
+    "SMKPipeline.load_bars(bars: list[dict])",
+    "SMKPipeline.step(bar: dict) -> dict",
+    "SMKPlugin.update(bar: dict, df: pd.DataFrame, smk: dict) -> dict",
+    "SovereignMarketKernel.__init__()",
+    "LambdaFusionEngine.fuse(sensors: list) -> dict"
+  ]
 }

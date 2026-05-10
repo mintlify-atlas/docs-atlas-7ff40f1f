@@ -1,0 +1,61 @@
+---
+title: "REST and WebSocket API endpoints reference overview"
+description: "Complete reference for all QUIMERIA-HYPERION REST endpoints and WebSocket feeds. Base URL is http://localhost:8000. No authentication required by default."
+---
+
+The QUIMERIA-HYPERION backend exposes a FastAPI server at `http://localhost:8000`. All REST endpoints return JSON. Two persistent WebSocket feeds handle backtest streaming and live Bitget data. Authentication is not required for local operation; exchange API keys are passed in request bodies or set as environment variables.
+
+## Base URL
+
+```
+http://localhost:8000
+```
+
+## Endpoint index
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/load/csv` | Load OHLCV bars from pasted CSV text |
+| `POST` | `/api/load/bitget` | Fetch candles from Bitget spot via REST API |
+| `POST` | `/api/load/oanda` | Fetch candles from OANDA via v20 API |
+| `POST` | `/api/load/sample` | Load built-in synthetic AMD cycle data |
+| `POST` | `/api/config/modules` | Enable or disable individual SMK detector modules |
+| `GET` | `/api/status` | Pipeline status: bars loaded, cursor, AMD state, module health |
+| `GET` | `/api/logs` | List available log files with file sizes |
+| `GET` | `/api/logs/{filename}` | Read the last N lines of a named log file |
+| `GET` | `/api/plugins` | Plugin registry status and per-plugin health |
+| `POST` | `/api/plugins/toggle` | Enable or disable plugins by name |
+| `POST` | `/api/live/start` | Start Bitget REST polling live feed |
+| `POST` | `/api/live/stop` | Stop the live feed |
+| `GET` | `/api/execution/status` | AEGIS bridge availability and configuration |
+| `GET` | `/api/execution/stats` | StopLossManager session statistics |
+| `WS` | `/ws/stream` | Bar-by-bar backtest replay with full SMK result |
+| `WS` | `/ws/live` | Live Bitget tick stream processed through SMK |
+
+## Authentication
+
+No authentication is enforced by default. Exchange credentials are supplied per-request:
+
+- **Bitget** — `api_key` and `api_secret` in the `POST /api/load/bitget` body, or via `BITGET_API_KEY` / `BITGET_SECRET` / `BITGET_PASSPHRASE` environment variables for the live feed.
+- **OANDA** — `token` and `account_id` in the `POST /api/load/oanda` body.
+
+<Note>
+Never commit API keys to source control. Set them as environment variables and reference them from a `.env` file that is excluded from version control.
+</Note>
+
+## Detailed references
+
+<CardGroup cols={2}>
+  <Card title="Data loading" icon="database" href="/api/data-loading">
+    Load OHLCV data from CSV, Bitget, OANDA, or the built-in sample generator.
+  </Card>
+  <Card title="System control" icon="sliders" href="/api/system-control">
+    Toggle SMK modules, read status, manage plugins, and tail log files.
+  </Card>
+  <Card title="Execution" icon="bolt" href="/api/execution">
+    AEGIS bridge status, StopLossManager stats, and live feed control.
+  </Card>
+  <Card title="WebSocket streaming" icon="radio" href="/api/websocket-streaming">
+    Backtest replay over WebSocket with per-bar SMK result payloads.
+  </Card>
+</CardGroup>

@@ -1,0 +1,194 @@
+---
+title: "SMART-EXE: FAISS memory and GRU prediction"
+description: "How the Smart Intelligence Engine uses FAISS vector search and a GRU predictor to recall historical patterns, score consolidation, and self-correct after losses."
+---
+
+The Smart Intelligence Engine (`core/kernel/smart_intelligence.py`) is the pattern memory and predictive analytics layer of QUIMERIA-HYPERION. It augments the structural and sensor layers with learned experience: every candle sequence the system has ever seen is stored as a neural embedding, and on each new bar the engine retrieves the most similar historical contexts to estimate what happens next. It also maintains a consolidation index and adaptive confidence gate that prevent the system from over-trading in choppy markets or after a losing streak.
+
+## Architecture overview
+
+The engine is composed of three cooperating components:
+
+```
+EnhancedSymbolicEncoder
+    │  Converts raw OHLC to 7-symbol alphabet (B, X, I, W, D, S, U)
+    ▼
+FAISSMemory (+ GRUWrapper)
+    │  Encodes symbol sequences into 16-dim vectors
+    │  Stores and retrieves via FAISS IndexFlatIP
+    ▼
+SmartMarketStateEngine
+    │  Computes ρ_c, p_stop_hunt, η_trend, entropy
+    ▼
+SmartIntelligenceEngine.step() → result dict
+```
+
+## Candle encoder
+
+Before any vector operation, every candle is reduced to a single symbol from a seven-character alphabet:
+
+| Symbol | Candle type | Condition |
+|--------|-------------|-----------|
+| `B` | Bullish strong | `body > 2 × avg_body`, `close > open` |
+| `X` | Bearish strong | `body > 2 × avg_body`, `close < open` |
+| `I` | Bullish weak | `body ≤ avg_body`, `close > open` |
+| `W` | Bearish weak | `body ≤ avg_body`, `close < open` |
+| `D` | Doji / neutral | `body ≤ 0.1 × avg_body` |
+| `S` | Spinning top | `body ≤ avg_body` and `range > 2 × body` |
+| `U` | Uncertain / gap | Fallback for ambiguous structures |
+
+```python
+# smart_intelligence.py — symbolic encoding
+def encode_candle(self, open_p, high, low, close) -> str:
+    body     = abs(close - open_p)
+    body_avg = np.mean(self.avg_body_history) if self.avg_body_history else body
+
+    if body <= 0.1 * body_avg:
+        return CandleType.D
+    elif body <= body_avg and (high - low) > 2 * body:
+        return CandleType.S
+    elif body > 2 * body_avg:
+        return CandleType.B if close > open_p else CandleType.X
+    else:
+        return CandleType.I if close > open_p else CandleType.W
+```
+
+The `avg_body_history` is a rolling deque of length 20, so the encoding adapts to recent volatility conditions. A candle that would be `B` in a calm period may be only `I` during high-volatility sessions.
+
+## FAISS pattern memory
+
+`FAISSMemory` is the long-term memory of the engine. It stores every observed n-gram (default: last 5 symbols) as a 16-dimensional neural embedding and uses FAISS inner-product search to retrieve the `k` most similar historical contexts.
+
+### GRU embedding network
+
+The embedding network converts a symbol sequence into a vector using a three-layer architecture:
+
+```python
+# smart_intelligence.py — embedding network
+self.embedding_net = nn.Sequential(
+    nn.Embedding(8, 32),      # Map 7 symbols + unknown to 32-dim
+    GRUWrapper(32, 64),        # GRU: hidden_size = 64, take last state
+    nn.Linear(64, self.dim)    # Project to 16-dim retrieval space
+)
+```
+
+The GRU captures temporal dependencies within the n-gram — not just which symbols appeared, but in what order and with what momentum. Embeddings are computed with `torch.no_grad()` for inference-only speed.
+
+### FAISS index
+
+```python
+# smart_intelligence.py — FAISS index initialization
+if self.has_faiss:
+    self.index = faiss.IndexFlatIP(dim)  # Inner-product (cosine-equivalent after L2 norm)
+else:
+    self.vectors = []  # Pure-Python KNN fallback
+```
+
+<Info>
+FAISS is an optional dependency. Install with `pip install faiss-cpu` (or `faiss-gpu` for CUDA). Without it, the engine falls back to a NumPy dot-product KNN that is functionally equivalent but slower for large memory stores.
+</Info>
+
+### Memory query and output metrics
+
+On each bar, the engine queries the `k=50` nearest historical n-grams and computes three statistics:
+
+```python
+# smart_intelligence.py — query returns (expected_epsilon, confidence, mutual_info)
+weights        = np.exp(scores[:len(epsilons)])
+weights       /= weights.sum() + 1e-9
+expected_eps   = np.average(epsilons, weights=weights)     # Weighted mean outcome
+variance       = np.average((epsilons - expected_eps)**2, weights=weights)
+confidence     = 1.0 - min(variance / 4.0, 1.0)           # 1 − normalized variance
+mi             = (marginal_entropy - cond_entropy) / (marginal_entropy + 1e-9)  # Predictability
+```
+
+| Output | Key | Description |
+|--------|-----|-------------|
+| Expected epsilon | `expected_epsilon` | Weighted average outcome of similar historical sequences |
+| Memory confidence | `memory_confidence` | How consistently similar sequences produced the same outcome |
+| Predictability MI | `predictability_mi` | Mutual information between pattern and next symbol |
+
+## ρ_c Consolidation Index
+
+The `SmartMarketStateEngine` tracks the density of neutral candles in the recent sequence. `ρ_c` (rho-c) is the fraction of doji (`D`) and spinning-top (`S`) candles in the last `window` (default 120) bars:
+
+```python
+# smart_intelligence.py — consolidation index
+doji_count = seq.count('D') + seq.count('S')
+rho_c      = doji_count / n
+```
+
+A high `ρ_c` indicates a choppy, trendless market where IPDA is in the Accumulation phase and displacement is not yet imminent. The engine suppresses `expected_epsilon` when `ρ_c` is elevated, preventing entries into consolidation noise.
+
+The full state vector also includes:
+
+| Field | Description |
+|-------|-------------|
+| `rho_c` | Consolidation density (doji fraction) |
+| `p_stop_hunt` | Probability of a stop hunt based on `B/X → D/S` transitions |
+| `eta_trend` | Trend efficiency — mean run length normalized to target of 5 bars |
+| `entropy` | Shannon entropy of symbol distribution (high = choppy) |
+
+## Adaptive Performance Gate
+
+The Adaptive Performance Gate (`AdaptivePerformanceGate` in `core/kernel/market_shark_forensics.py`) raises the confidence threshold required for execution after consecutive losses. It is a self-correcting circuit: the system becomes more selective when its recent performance degrades.
+
+The gate reads the recent P&L from `logs/trades.log` and computes a rolling win rate. If the win rate falls below the gate's threshold, `adaptive_threshold` is elevated. The SMK outputs this in the `forensics` dict:
+
+```json
+{
+  "forensics": {
+    "adaptive_threshold": 1.25,
+    "rhythm_status": "harmonic"
+  }
+}
+```
+
+An `adaptive_threshold > 1.0` means the gate is active and execution requires higher-than-normal fusion confidence. The gate resets to `1.0` after a winning trade.
+
+## HSKM sparse kernel attention (v1.1)
+
+Version 1.1 adds the **Hierarchical Sparse Kernel Memory** module (`core/kernel/sparse_kernel_attention.py`). HSKM replaces the dense FAISS flat index with a sparse attention mechanism that selectively weights historical memories by structural similarity rather than raw embedding distance. This improves retrieval quality in regimes where the symbol sequence is ambiguous.
+
+<Note>
+HSKM is a v1.1 addition from the 16-repo integration sprint. As of the current release, it lives alongside `FAISSMemory` and is activated by setting `use_hskm=True` in the `SmartIntelligenceEngine` constructor. GPU target (CUDA vs. MPS vs. CPU fallback) must be confirmed before enabling in production.
+</Note>
+
+## Integration via the AEGIS bridge
+
+The `SmartIntelligenceEngine.step()` output appears in the `step()` result dict under `smart_intelligence`:
+
+```json
+{
+  "smart_intelligence": {
+    "expected_epsilon": 0.05,
+    "memory_confidence": 0.72,
+    "predictability_mi": 0.60,
+    "state": {
+      "rho_c": 0.18,
+      "p_stop_hunt": 0.31,
+      "eta_trend": 0.64,
+      "entropy": 2.41
+    }
+  }
+}
+```
+
+The AEGIS bridge (`backend/aegis_bridge.py`) reads `memory_confidence` as an additional weighting factor for the `StopLossManager`. When `memory_confidence` is low (< 0.5), the stop-loss is tightened relative to the ATR-based default. When confidence is high (> 0.8), the `SchurRouter` may widen the target to reach the DOL level identified by the expansion predictor.
+
+```
+SmartIntelligenceEngine.step()
+    │
+    ├── memory_confidence → StopLossManager (SL width adjustment)
+    ├── expected_epsilon  → SchurRouter (target scaling)
+    └── rho_c             → Fusion Engine (consolidation suppression)
+```
+
+<CardGroup cols={2}>
+  <Card title="Ring 0 veto" icon="shield-halved" href="/modules/ring-0-veto">
+    Hard-stop guards upstream of the AEGIS bridge
+  </Card>
+  <Card title="IPDA Structural Compiler" icon="layer-group" href="/modules/ipda-structural-compiler">
+    Layer 1 context that feeds the AMD state machine
+  </Card>
+</CardGroup>

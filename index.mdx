@@ -1,133 +1,72 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "QUIMERIA-HYPERION: Sovereign Market Kernel"
+description: "Institutional-grade algorithmic trading platform fusing IPDA structural analysis, Bayesian regime detection, spectral forensics, and FAISS pattern memory."
 ---
 
-## Setting up
+QUIMERIA-HYPERION is the **Sovereign Market Kernel (SMK)** — a production-ready algorithmic trading system that decodes market structure in real time. It treats price action as a deterministic Interbank Price Delivery Algorithm (IPDA) cycle and applies a multi-layered intelligence stack — from Bayesian HMM orchestration to Ring 0 veto authority — to generate high-conviction trade signals with built-in safeguards.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Run the SMK backend and open the live trading dashboard in under 5 minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Install Python dependencies, optional GPU acceleration, and configure environment variables.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the multi-layer kernel structure: Ring -1, Layers 1–4, and Ring 0 veto.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/overview">
+    Explore all REST endpoints, WebSocket feeds, and the plugin development contract.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## How the SMK works
 
-Everything you need to create world-class documentation.
+The kernel processes market data bar-by-bar through a layered pipeline. Each layer adds context until Ring 0 either clears or vetoes trade execution.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="IPDA Structural Compiler" icon="building-columns" href="/modules/ipda-structural-compiler">
+    Identifies dealing ranges, premium/discount zones, and the AMD state machine.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Lambda Sensors (λ₁–λ₈)" icon="wave-sine" href="/modules/lambda-sensors">
+    Eight real-time sensors detecting volatility, timing, harmonics, manipulation, and macro bias.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Ring 0 Veto System" icon="shield-halved" href="/modules/ring-0-veto">
+    Six hard-stop conditions including topological fracture, KL divergence, and Mandra energy gate.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Smart Intelligence" icon="brain" href="/modules/smart-intelligence">
+    FAISS-powered pattern memory and GRU predictor for historical similarity matching.
   </Card>
-</Columns>
+</CardGroup>
 
-## Make your content agent ready
+## Connect your data
 
-Make your docs work for humans and AI agents alike.
+<CardGroup cols={2}>
+  <Card title="Data Sources" icon="database" href="/integrations/data-sources">
+    Load OHLCV data from CSV, Bitget, OANDA, MT4/MT5, TradingView, and Dukascopy.
+  </Card>
+  <Card title="Exchange Connections" icon="arrows-left-right" href="/integrations/exchange-connections">
+    Live feed integrations for Bitget, Fyers, Coinbase Advanced Trade, and generic markets.
+  </Card>
+  <Card title="MetaTrader 5" icon="chart-line" href="/integrations/metatrader5">
+    Connect MT5 via the ZeroMQ bridge for tick-level data and order execution.
+  </Card>
+  <Card title="Plugin System" icon="puzzle-piece" href="/architecture/plugin-system">
+    Extend the kernel with custom forensic detectors using the SMKPlugin base class.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+## Deploy and operate
 
-## Need inspiration?
+<CardGroup cols={2}>
+  <Card title="Deployment" icon="server" href="/operations/deployment">
+    Run as a systemd service on Linux, a Windows service via NSSM, or in development mode.
+  </Card>
+  <Card title="Monitoring & Logging" icon="chart-bar" href="/operations/monitoring-logging">
+    Five rotating log streams — events, veto decisions, trades, session, and raw bars.
+  </Card>
+</CardGroup>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Warning>
+  This software is for educational and research purposes only. Algorithmic trading involves substantial risk of financial loss. Always paper trade before going live. Never commit API keys to source control.
+</Warning>

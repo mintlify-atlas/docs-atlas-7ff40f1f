@@ -1,0 +1,249 @@
+---
+title: "Deploy QUIMERIA-HYPERION: Linux, Windows, and dev"
+description: "Step-by-step deployment instructions for QUIMERIA-HYPERION in development mode, as a Linux systemd service, and as a Windows NSSM service."
+---
+
+QUIMERIA-HYPERION runs as a single FastAPI/uvicorn process. The backend serves both the REST API and the TradingView frontend from port 8000. The `SMK_DIR` environment variable must point to the project root so cross-module imports resolve correctly — the provided launchers set this automatically, but manual deployments require it explicitly.
+
+<Note>
+  The server never crashes on missing optional dependencies. Modules like `jax`, `ripser`, and `faiss-cpu` degrade gracefully to numpy stubs. You will see `[WARN]` lines at startup for any missing optional module — these are expected and safe.
+</Note>
+
+---
+
+## Prerequisites
+
+- Python 3.10 or later (3.12+ recommended)
+- pip package manager
+- Node.js 18+ (only if doing frontend development — the dashboard is a single static HTML file in production)
+
+### Install dependencies
+
+```bash
+pip install -r requirements.txt
+
+# Optional: GPU acceleration and topology
+pip install jax jaxlib ripser faiss-cpu
+```
+
+---
+
+## Development
+
+Use development mode when iterating on the pipeline or frontend. The `--reload` flag restarts the server automatically on file changes.
+
+<Steps>
+  <Step title="Set the SMK_DIR environment variable">
+    ```bash
+    # Linux / macOS
+    export SMK_DIR=/path/to/QUIMERIA-HYPERION
+    export PYTHONPATH=$SMK_DIR:$SMK_DIR/backend:$PYTHONPATH
+
+    # Windows PowerShell
+    $env:SMK_DIR = "C:\Users\you\Documents\QUIMERIA-HYPERION"
+    $env:PYTHONPATH = "$env:SMK_DIR;$env:SMK_DIR\backend;$env:PYTHONPATH"
+    ```
+  </Step>
+  <Step title="Start the development server">
+    ```bash
+    cd backend
+    python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ```
+  </Step>
+  <Step title="Open the dashboard">
+    Navigate to `http://localhost:8000` in your browser. The dashboard includes the TradingView chart, all 14 SMK sensor bars, 6 plugin sensor bars, the execution panel, and live log panels.
+  </Step>
+</Steps>
+
+<Tip>
+  Run the AEGIS bridge verification after startup to confirm the stop-loss manager and SchurRouter loaded correctly:
+  ```bash
+  cd backend
+  python test_bridge.py
+  ```
+</Tip>
+
+---
+
+## Linux production (systemd)
+
+The repository ships with a ready-to-use systemd unit file at `quimeria.service`. It configures `SMK_DIR`, `PYTHONPATH`, log redirection, and automatic restart on failure.
+
+<Steps>
+  <Step title="Edit the service file with your paths">
+    Open `quimeria.service` and replace the placeholder paths with your actual installation directory and username:
+
+    ```ini
+    [Unit]
+    Description=QUIMERIA-HYPERION Sovereign Market Kernel
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=youruser
+    WorkingDirectory=/home/youruser/QUIMERIA-HYPERION/backend
+    Environment="SMK_DIR=/home/youruser/QUIMERIA-HYPERION"
+    Environment="PYTHONPATH=/home/youruser/QUIMERIA-HYPERION:/home/youruser/QUIMERIA-HYPERION/backend"
+    ExecStart=/usr/bin/python3 -m uvicorn main:app \
+      --host 0.0.0.0 --port 8000 --workers 1 --log-level info
+    Restart=on-failure
+    RestartSec=10
+    StandardOutput=append:/home/youruser/QUIMERIA-HYPERION/logs/backend.log
+    StandardError=append:/home/youruser/QUIMERIA-HYPERION/logs/backend.log
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+  </Step>
+  <Step title="Install and enable the service">
+    ```bash
+    sudo cp quimeria.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable quimeria
+    ```
+  </Step>
+  <Step title="Start the service">
+    ```bash
+    sudo systemctl start quimeria
+    sudo systemctl status quimeria
+    ```
+  </Step>
+  <Step title="Verify startup">
+    ```bash
+    # Follow the combined backend log
+    tail -f /home/youruser/QUIMERIA-HYPERION/logs/backend.log
+
+    # Check the API is responding
+    curl http://localhost:8000/api/status
+    ```
+  </Step>
+</Steps>
+
+### Linux launcher script
+
+The `scripts/start.sh` launcher is an alternative to systemd for development servers or machines without root access. It sets `SMK_DIR` and `PYTHONPATH` automatically.
+
+<CodeGroup>
+```bash Start
+scripts/start.sh
+```
+
+```bash Start with grid bot
+scripts/start.sh --all
+```
+
+```bash Custom port
+scripts/start.sh --port 8080
+```
+
+```bash Stop all services
+scripts/start.sh --stop
+```
+
+```bash Check status
+scripts/start.sh --status
+```
+</CodeGroup>
+
+---
+
+## Windows service (NSSM)
+
+NSSM (Non-Sucking Service Manager) runs QUIMERIA-HYPERION as a Windows service that starts with the OS and restarts on failure.
+
+<Steps>
+  <Step title="Install NSSM">
+    Download NSSM from [nssm.cc](https://nssm.cc) and place `nssm.exe` in a directory on your `PATH`, or reference it by full path.
+  </Step>
+  <Step title="Install the service">
+    Open an administrator Command Prompt and run:
+
+    ```cmd
+    nssm install QuimeriaSMK "C:\Python312\python.exe" "-m uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1"
+    nssm set QuimeriaSMK AppDirectory "C:\path\to\QUIMERIA-HYPERION\backend"
+    nssm set QuimeriaSMK AppEnvironmentExtra "SMK_DIR=C:\path\to\QUIMERIA-HYPERION"
+    nssm set QuimeriaSMK AppEnvironmentExtra "PYTHONPATH=C:\path\to\QUIMERIA-HYPERION;C:\path\to\QUIMERIA-HYPERION\backend"
+    nssm set QuimeriaSMK AppStdout "C:\path\to\QUIMERIA-HYPERION\logs\backend.log"
+    nssm set QuimeriaSMK AppStderr "C:\path\to\QUIMERIA-HYPERION\logs\backend.log"
+    ```
+  </Step>
+  <Step title="Start the service">
+    ```cmd
+    nssm start QuimeriaSMK
+    ```
+  </Step>
+  <Step title="Verify the service is running">
+    ```cmd
+    nssm status QuimeriaSMK
+    curl http://localhost:8000/api/status
+    ```
+  </Step>
+</Steps>
+
+### Windows launcher script
+
+For development or non-service deployments on Windows, use the provided batch launcher:
+
+```cmd
+scripts\start.bat
+```
+
+---
+
+## SMK_DIR requirement
+
+`SMK_DIR` is the single most critical environment variable. Without it, `smk_pipeline._find_smk_root()` cannot locate the project root, module imports fail silently, and the server runs in **numpy fallback mode** — all 18 detector modules are replaced with numpy stubs that return neutral scores.
+
+<Tabs>
+  <Tab title="Linux / macOS">
+    ```bash
+    export SMK_DIR=/path/to/QUIMERIA-HYPERION
+    export PYTHONPATH=$SMK_DIR:$SMK_DIR/backend:$PYTHONPATH
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    $env:SMK_DIR = "C:\path\to\QUIMERIA-HYPERION"
+    $env:PYTHONPATH = "$env:SMK_DIR;$env:SMK_DIR\backend;$env:PYTHONPATH"
+    ```
+  </Tab>
+  <Tab title="Windows Command Prompt">
+    ```cmd
+    set SMK_DIR=C:\path\to\QUIMERIA-HYPERION
+    set PYTHONPATH=%SMK_DIR%;%SMK_DIR%\backend;%PYTHONPATH%
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Access points after startup
+
+| Endpoint | URL |
+|----------|-----|
+| Dashboard | `http://localhost:8000` |
+| REST API (Swagger) | `http://localhost:8000/docs` |
+| Health ping | `http://localhost:8000/api/ping` |
+| Full status | `http://localhost:8000/api/status` |
+| WebSocket stream | `ws://localhost:8000/ws/stream` |
+| WebSocket live feed | `ws://localhost:8000/ws/live` |
+
+---
+
+## Custom port
+
+All launchers support a custom port. The frontend auto-detects the host and port from `window.location`, so the dashboard works on any port without code changes.
+
+<Tabs>
+  <Tab title="Direct uvicorn">
+    ```bash
+    cd backend
+    python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+    ```
+  </Tab>
+  <Tab title="Linux script">
+    ```bash
+    scripts/start.sh --port 8080
+    ```
+  </Tab>
+</Tabs>

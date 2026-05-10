@@ -1,0 +1,173 @@
+---
+title: "Signal processing pipeline: bar-by-bar execution"
+description: "How SMKPipeline.step() processes each OHLCV bar through 18+ detector modules, produces the canonical result dict, and enforces JSON safety before WebSocket delivery."
+---
+
+Every tick of market data flows through a single, strictly ordered pipeline: raw bars are normalized by the data connectors, loaded into `SMKPipeline`, and then advanced one bar at a time by calling `step()`. The `step()` method is the system's heartbeat — it runs every detector module in sequence, collects their outputs into a single result dict, and hands that dict to the AEGIS bridge and WebSocket layer.
+
+## Data source to pipeline flow
+
+The path from a raw data source to a step result follows four stages:
+
+```text
+Data source (CSV / Bitget / OANDA / sample)
+    ↓  data_connectors.py — normalizes to [{time, open, high, low, close, volume}]
+    ↓  SMKPipeline.load_bars()
+    ↓  SMKPipeline.step()  — called once per bar
+    ├── Layer 1 (Structural):  core/detectors/ — DealingRange, BiasDetector, IPDAPhase,
+    │                          EquilibriumCross, SessionDetector, SwingDetector
+    ├── Layer 2 (Memory):      liquidity/ — FVGDetector, OrderBlockDetector, VolumeProfile
+    ├── Layer 3 (λ Sensors):   lambda_sensors/ — λ₁Volatility, λ₂Killzone, λ₃Harmonic,
+    │                          λ₄Manipulation, λ₅Displacement, λ₆MacroBias
+    ├── Layer 4 / Ring 0:      detectors/ + risk/ — KLDivergence, TopologicalFracture,
+    │                          MandraKernel, LambdaFusionEngine
+    ├── Plugin layer:          backend/plugins/ — 6 forensic plugins appended to sensors[]
+    └── AEGIS bridge:          backend/aegis_bridge.py — StopLossManager + SchurRouter
+    ↓  step() returns a single result dict
+WebSocket /ws/stream  →  frontend/index.html (TradingView Lightweight Charts)
+```
+
+<Note>
+`data_connectors.py` normalizes all supported formats — MT4/MT5 CSV, TradingView ISO/US export, Dukascopy UTC, Bitget REST, and OANDA REST — into the same `[{time, open, high, low, close, volume}]` schema before any bar reaches the pipeline.
+</Note>
+
+## Iterating over bars
+
+The typical pattern for consuming the pipeline in backtest mode is to call `step()` in a loop until it returns `None`. Each call advances `self.cursor` by one.
+
+```python
+import asyncio
+from backend.smk_pipeline import SMKPipeline
+from backend.data_connectors import load_csv
+
+pipeline = SMKPipeline()
+bars = load_csv("EURUSD_H1.csv")
+pipeline.load_bars(bars)
+
+async def run():
+    while True:
+        result = await pipeline.step()
+        if result is None:
+            break  # All bars consumed
+
+        # Check veto before acting
+        if result["veto"]["trade_allowed"]:
+            print(f"Bar {result['bar_index']}: PROCEED — p_fused={result['fusion']['p_fused']:.3f}")
+        else:
+            reasons = result["veto"]["reasons"]
+            print(f"Bar {result['bar_index']}: HALT — {reasons}")
+
+asyncio.run(run())
+```
+
+## The step() result dict
+
+`step()` returns a single dict that is the canonical data contract between the pipeline, the AEGIS bridge, the WebSocket server, and the frontend. The top-level keys are:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `bar` | `dict` | Raw OHLCV bar: `{time, open, high, low, close, volume}` |
+| `bar_index` | `int` | Zero-based position of this bar in `raw_bars` |
+| `total_bars` | `int` | Total number of bars loaded |
+| `dealing_range` | `dict` | 60-day high/low, equilibrium, zone, coherence |
+| `bias` | `dict` | `bias` (BULLISH/BEARISH/NEUTRAL), equilibrium, zone, coherence |
+| `ipda_phase` | `dict` | IPDA phase, equilibrium, confidence |
+| `eq_cross` | `dict` | Equilibrium cross event and direction |
+| `session` | `dict` | Active session name, killzone flag, efficiency score |
+| `swings` | `dict` | Swing pivot count and last 6 nodes |
+| `fvg` | `dict` | Fair Value Gap count, active flag, recent gaps |
+| `ob` | `dict` | Order Block count, active flag, recent blocks |
+| `vol_profile` | `dict` | Volume Profile TAP density result |
+| `vol_decay` | `dict` | λ₁ ratio, entrapped flag, energy |
+| `displacement` | `dict` | λ₅ body_ratio, is_disp, dir, vetoed |
+| `harmonic` | `dict` | λ₃ phase_diff, inverted (Liar State flag) |
+| `expansion` | `dict` | Expansion probability |
+| `manipulation` | `dict` | λ₄ score (0–100), active flag |
+| `kl` | `dict` | KL divergence score, stable flag |
+| `topology` | `dict` | H₁ loop score, fractured flag |
+| `amd` | `dict` | AMD state machine state and R_MASTER flag |
+| `fusion` | `dict` | `p_fused`, confidence, veto_active, regime, active_lambdas |
+| `mandra` | `dict` | `open`, `delta_e`, clamped size, regime_stable |
+| `gmos` | `dict` | execute, action, p_fused, coherence, hamiltonian, phase |
+| `veto` | `dict` | `decision`, `trade_allowed`, `reasons[]` |
+| `sensors` | `list` | Sensor rows for the frontend panel (s01–s19 + plugin rows) |
+| `plugins` | `dict` | Per-plugin telemetry keyed by plugin name |
+| `execution` | `dict` | AEGIS output: action, direction, lot_size, SL/TP prices |
+| `latency` | `dict` | Per-stage latency breakdown in microseconds |
+
+<Warning>
+Never remove or rename an existing key in the result dict. The frontend sensor panel and execution panel depend on the exact key names. Adding new keys is safe.
+</Warning>
+
+The veto sub-dict is the most critical field for execution logic:
+
+```python
+result["veto"] == {
+    "decision":      "Proceed",   # "Proceed" | "Halt" | "Reset"
+    "trade_allowed": True,         # False if any Ring 0 condition fires
+    "reasons":       []            # List of veto reason strings
+}
+```
+
+## Fail-safe import pattern
+
+Every module in `SMKPipeline._load_modules()` is loaded through a `try_load()` wrapper. If a module's dependencies are missing or the import raises any exception, the error is appended to `self._import_errors` and the module slot is set to `None`. The pipeline never crashes on import failure — it falls back to numpy stubs for each failed module.
+
+```python
+def _load_modules(self):
+    def try_load(key, factory):
+        try:
+            self.modules[key] = factory()
+        except Exception as e:
+            self._import_errors.append(f"{key}: {e}")
+            self.modules[key] = None
+
+    try_load("bias",    lambda: _imp("core.bias_detector", "BiasDetector")())
+    try_load("fusion",  lambda: _imp("core.kernel.lambda_fusion_engine", "LambdaFusionEngine")())
+    try_load("mandra",  lambda: _imp("risk.mandra_kernels", "MandraGate")())
+    # ... 20+ more modules
+```
+
+<Tip>
+Run `pipeline.get_status()` after initialization to inspect which modules loaded successfully and which fell back to stubs. The `modules_failed` list shows the full error message for each failed import.
+</Tip>
+
+This pattern is intentional and must be preserved when adding new modules. The server must stay live even when optional dependencies such as `jax`, `ripser`, or `faiss-cpu` are not installed.
+
+## JSON safety
+
+All values that exit `step()` pass through `_sanitize()`, which recursively converts numpy scalars and arrays to plain Python types. The `_SafeEncoder` in `main.py` handles residual edge cases in WebSocket frames.
+
+```python
+def _sanitize(obj):
+    """Recursively convert numpy types to plain Python before JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+```
+
+<Warning>
+Any new detector that returns `np.float32`, `np.int64`, or an `ndarray` directly will break the WebSocket stream with a `TypeError: Object of type float32 is not JSON serializable` error. Always wrap detector output through `_sanitize()` or return plain Python types from the detector itself.
+</Warning>
+
+## Latency budget
+
+`step()` records per-stage latency after every bar. The system-level SLO is 5 ms total:
+
+| Stage | SLO |
+|-------|-----|
+| Data / structural (L1–L2) | 0.5 ms |
+| Lambda sensors (L3) | 2.0 ms |
+| Fusion (Ring 0) | 1.0 ms |
+| Mandra gate | 0.5 ms |
+| Execution (AEGIS) | 1.0 ms |
+
+The full breakdown is available in `result["latency"]["breakdown_us"]`. SLO violations are listed in `result["latency"]["slo_violations"]`.

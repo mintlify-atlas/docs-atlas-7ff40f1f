@@ -1,0 +1,266 @@
+---
+title: "Configure the Sovereign Market Kernel for live trading"
+description: "Configure exchange API keys, trading parameters, and the 18 SMK module toggles, then tune Ring 0 signal thresholds for your instrument and timeframe."
+---
+
+QUIMERIA-HYPERION is configured through a `.env` file in the project root and a runtime API endpoint for toggling individual kernel modules. This page documents every environment variable, the module toggle endpoint, and the key signal thresholds that govern Ring 0 veto decisions.
+
+## .env file
+
+Create `.env` in the QUIMERIA-HYPERION project root. None of these variables are required to start the server — missing API keys simply disable the corresponding exchange connector, and trading parameters fall back to defaults.
+
+```env
+# Required — project root for module resolution
+SMK_DIR=/path/to/QUIMERIA-HYPERION
+```
+
+### Server settings
+
+<ParamField body="WS_HOST" type="string" default="0.0.0.0">
+  Host address for the FastAPI/WebSocket server. Use `0.0.0.0` to bind all interfaces or `127.0.0.1` to restrict to localhost.
+</ParamField>
+
+<ParamField body="WS_PORT" type="integer" default="8000">
+  Port for the FastAPI server and WebSocket endpoints. The dashboard is served at `http://<host>:<port>/`.
+</ParamField>
+
+### Trading parameters
+
+<ParamField body="DEFAULT_PROFIT_TARGET" type="float" default="2.0">
+  Default profit target as a percentage. Used by the Auto-Profit Manager when no instrument-specific override is set.
+</ParamField>
+
+<ParamField body="DEFAULT_STOP_LOSS" type="float" default="2.0">
+  Default stop-loss as a percentage. The AEGIS StopLossManager uses this as the initial stop before dynamic adjustment.
+</ParamField>
+
+<ParamField body="MAX_POSITION_SIZE" type="integer" default="100000">
+  Maximum position size in base currency units. Enforced by the SchurRouter before order submission.
+</ParamField>
+
+<ParamField body="RISK_PER_TRADE" type="float" default="0.02">
+  Fraction of account equity risked per trade (0.02 = 2%). Combined with Kelly sizing from the UQPCE uncertainty module.
+</ParamField>
+
+### Bitget API
+
+<ParamField body="BITGET_API_KEY" type="string">
+  Bitget REST API key. Required for `/api/load/bitget` and `/api/live/start` endpoints.
+</ParamField>
+
+<ParamField body="BITGET_SECRET" type="string">
+  Bitget API secret for HMAC request signing.
+</ParamField>
+
+<ParamField body="BITGET_PASSPHRASE" type="string">
+  Bitget API passphrase set during key creation.
+</ParamField>
+
+### Fyers API (NSE)
+
+<ParamField body="FYERS_APP_ID" type="string">
+  Fyers application ID for NSE market data and order routing via `smk_fyers_integration.py`.
+</ParamField>
+
+<ParamField body="FYERS_SECRET" type="string">
+  Fyers API secret key.
+</ParamField>
+
+### TradingView webhook credentials
+
+These credentials are used when TradingView alerts trigger the SMK webhook receiver.
+
+<ParamField body="TV_API_KEY_MEXC" type="string">
+  MEXC API key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_SECRET_KEY_MEXC" type="string">
+  MEXC secret key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_API_KEY_BYBIT" type="string">
+  Bybit API key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_SECRET_KEY_BYBIT" type="string">
+  Bybit secret key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_API_KEY_OKX" type="string">
+  OKX API key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_SECRET_KEY_OKX" type="string">
+  OKX secret key for TradingView alert execution.
+</ParamField>
+
+<ParamField body="TV_PASSPHRASE_OKX" type="string">
+  OKX API passphrase (required by OKX; leave blank for MEXC and Bybit).
+</ParamField>
+
+<ParamField body="TV_TRADE_MODE" type="string" default="spot">
+  Trading mode for TradingView webhooks. Use `"spot"` for forex/spot or `"futures"` for derivatives.
+</ParamField>
+
+### MetaTrader 4/5 credentials
+
+<ParamField body="MT_API_KEY_MEXC" type="string">
+  MEXC API key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_SECRET_KEY_MEXC" type="string">
+  MEXC secret key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_API_KEY_BYBIT" type="string">
+  Bybit API key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_SECRET_KEY_BYBIT" type="string">
+  Bybit secret key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_API_KEY_OKX" type="string">
+  OKX API key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_SECRET_KEY_OKX" type="string">
+  OKX secret key for MetaTrader EA/script execution.
+</ParamField>
+
+<ParamField body="MT_PASSPHRASE_OKX" type="string">
+  OKX API passphrase (required by OKX).
+</ParamField>
+
+<ParamField body="MT_TRADE_MODE" type="string" default="spot">
+  Trading mode for MetaTrader integrations. Use `"spot"` for forex/spot.
+</ParamField>
+
+<Warning>
+  Never commit your `.env` file to source control. Add it to `.gitignore` before your first commit. Treat all API keys as secrets — rotate any key you suspect has been exposed.
+</Warning>
+
+## Module toggle endpoint
+
+The 18 SMK pipeline modules can be individually enabled or disabled at runtime without restarting the server. This is useful for isolating specific detectors during debugging or reducing CPU load in constrained environments.
+
+**Endpoint:** `POST /api/config/modules`
+
+**Request body:**
+
+```json
+{
+  "disabled_modules": ["topology", "fvg"]
+}
+```
+
+Pass a list of module keys to disable. All modules not in this list are re-enabled. Pass an empty list to re-enable all modules. Available module keys: `bias`, `ipda`, `dealing`, `eq_cross`, `swing`, `session`, `vol_decay`, `displacement`, `harmonic`, `expansion`, `manipulation`, `fvg`, `ob`, `vol_profile`, `kl`, `fusion`, `mandra`, `topology`.
+
+**Example — disable topological fracture when ripser is not installed:**
+
+```bash
+curl -X POST http://localhost:8000/api/config/modules \
+  -H "Content-Type: application/json" \
+  -d '{"disabled_modules": ["topology"]}'
+```
+
+**Example — disable all Lambda sensors for structural-only analysis:**
+
+```bash
+curl -X POST http://localhost:8000/api/config/modules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "disabled_modules": [
+      "vol_decay", "displacement", "harmonic",
+      "expansion", "manipulation"
+    ]
+  }'
+```
+
+<Note>
+  Modules disabled via this endpoint remain disabled until re-enabled via another POST or until the server restarts. Disabling a Ring 0 module such as `mandra_kernel` or `kl_divergence` will allow trades that would otherwise be vetoed — do this only in paper-trading environments.
+</Note>
+
+## Advanced threshold tuning
+
+The thresholds below are the default values used by Ring 0 and the Lambda sensor layer. They are derived from CLAUDE.md and are calibrated for liquid forex instruments on H1 timeframes. Adjust them based on backtesting results for your specific instrument and timeframe.
+
+<Accordion title="λ1 Volatility Decay threshold (default: 0.7)">
+  **Parameter:** `λ1 threshold`  
+  **Default:** `0.7` (adaptive range: 0.5–0.8)  
+  **Logic:** `V_t / ATR₂₀ < 0.7` triggers the Entrapment signal — price has compressed relative to its 20-bar average range, indicating accumulation or distribution squeeze.
+
+  Lower this threshold (e.g., 0.5) on higher-volatility instruments like crypto to reduce false entrapment signals. Raise it (e.g., 0.8) on low-volatility instruments like JPY pairs.
+
+  Always wipe the ATR₂₀ cache after changing this threshold to prevent stale volatility bias from affecting the first N bars after the change.
+</Accordion>
+
+<Accordion title="λ3 Harmonic Inversion phase threshold (default: π/2)">
+  **Parameter:** `λ3 phase threshold`  
+  **Default:** `π/2` ≈ 1.5708 (adaptive range: π/4–3π/4)  
+  **Logic:** When the FFT phase difference `φ_diff > π/2`, the system enters Liar State and Ring 0 issues a `VETO_LIAR_STATE` halt.
+
+  During ultra-high-frequency volatility spikes, λ3 may over-veto even when the structural IPDA bias is strongly directional (the **λ3 Harmonic Trap Paradox**). In those environments, consider raising the threshold toward `3π/4` — but backtest the change first, as widening this gate can allow entries during genuine harmonic reversals.
+</Accordion>
+
+<Accordion title="Mandra Gate minimum information energy (default: 0.02)">
+  **Parameter:** `Mandra ΔE_min`  
+  **Default:** `0.02` (adaptive range: 0.005–0.08)  
+  **Logic:** A trade is only allowed when the Mandra kernel computes `ΔE ≥ 0.02` — meaning the proposed entry provides at least 2% net information energy gain over the current regime uncertainty.
+
+  A negative ΔE (`ERR_MANDRA_ENTROPY`) means the market is too chaotic for entry. Do not override this gate. During IPDA Reverse Periods (consolidation between quarterly shifts), expect frequent Mandra rejections — wait for the next delivery phase to begin.
+
+  Lower the threshold only after confirming via backtesting that your instrument produces ΔE values in a consistently higher range than the default.
+</Accordion>
+
+<Accordion title="HMM regime persistence prior (default: 0.6–0.95)">
+  **Parameter:** `HMM persistence prior`  
+  **Default:** `0.6–0.95` (state-dependent)  
+  **Logic:** The Hidden Markov Model in Ring -1 uses a persistence prior that biases the regime tracker toward staying in its current state. Higher values (toward 0.95) make the regime tracker slower to switch — appropriate for trend-following on daily timeframes. Lower values (toward 0.6) allow faster regime detection — appropriate for scalping or when macro conditions are actively shifting.
+
+  Do not increase Kelly position sizing until HMM Regime is STABLE (state 1 or 2). Regime 0 (SIDEWAYS) should trigger Accumulation logic and reduced or zero sizing.
+</Accordion>
+
+<Accordion title="Kelly fraction for position sizing (default: 0.05–0.5)">
+  **Parameter:** `Kelly fraction`  
+  **Default:** `0.05–0.5` (UQPCE-adjusted)  
+  **Logic:** The Kelly criterion fraction is dynamically adjusted by the UQPCE uncertainty module based on polynomial chaos expansion of recent P&L variance. The static bounds (0.05 minimum, 0.5 maximum) prevent both over-caution and over-leverage.
+
+  Hard risk limits enforced independently of Kelly:
+  - **Daily loss limit:** $50,000 (Emporia hard stop)
+  - **Max drawdown:** 10% (trading halt)
+  - **Max single-instrument concentration:** 25% of equity
+</Accordion>
+
+<Accordion title="Additional Ring 0 thresholds">
+  | Parameter | Value | Subsystem |
+  |---|---|---|
+  | FHT consciousness gate | 0.7 | Market aliveness filter (Fractal Harmonic Transform) |
+  | Hurst persistent regime | > 0.6 | Trending market classification |
+  | Hurst anti-persistent | < 0.4 | Mean-reversion market classification |
+  | Blackbody temp execute | > 0.8 | Multi-band synthesis execution trigger |
+  | Max total pipeline latency | 5ms | SLO: 0.5ms data + 2ms sensors + 1ms fusion + 0.5ms Mandra + 1ms execution |
+  | KL divergence halt | > 1.3× threshold | `ERR_REGIME_FRACTURE` — manual manifold recalibration required |
+  | Topological H₁ loop halt | Sum > threshold | `HALT_H1_LOOP` — wait for manifold compaction before re-entering |
+
+  The FHT consciousness threshold of 0.7 should be validated against historical data before live deployment. If your instrument consistently scores below 0.7 (common in very thin markets), consider disabling the FHT gate rather than lowering the threshold.
+</Accordion>
+
+## Ring 0 veto conditions reference
+
+These six conditions will halt all trade execution regardless of what any individual layer signals. They cannot be overridden by module configuration.
+
+| Veto code | Trigger | Source file |
+|---|---|---|
+| `MANDRA:ΔE<0` | Negative information energy gain | `risk/mandra_kernels.py` |
+| `TOPO:H1_FRACTURE` | Persistent homology loop sum exceeds threshold | `detectors/topological_fracture_detector.py` |
+| `FUSION:LAMBDA_VETO` | Any λ sensor issued a hard veto | `core/kernel/lambda_fusion_engine.py` |
+| `L3:LIAR_STATE` | FFT phase inversion `φ_diff > π/2` | `lambda_sensors/harmonic_trap_detector.py` |
+| `KL:REGIME_FRACTURE` | KL divergence > 1.3× threshold | `detectors/kl_divergence_detector.py` |
+| `CONF:INSUFFICIENT` | Fusion confidence < 0.2 | `core/kernel/lambda_fusion_engine.py` |
+
+Read veto decisions in real time from the log API:
+
+```bash
+curl "http://localhost:8000/api/logs/veto.log?lines=50"
+```

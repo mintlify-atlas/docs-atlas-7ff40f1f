@@ -1,0 +1,312 @@
+---
+title: "System control: modules, plugins, status, and logs"
+description: "Toggle SMK detector modules, inspect pipeline health, manage the plugin registry, and tail rotating log files via the QUIMERIA-HYPERION REST API."
+---
+
+The system control endpoints let you adjust which of the 18+ SMK detector modules are active, inspect pipeline state, manage plugins, and read log output — all without restarting the server. Module changes take effect immediately on the next bar processed.
+
+## POST /api/config/modules
+
+Enable or disable individual SMK detector modules at runtime. Pass a list of module keys to disable; all other modules remain enabled. Calling with an empty list re-enables every module.
+
+### Request body
+
+<ParamField body="disabled_modules" type="array" default={[]}>
+  List of module keys to disable. Any key not in this list is re-enabled if it was previously disabled.
+
+  Available module keys:
+
+  | Key | Layer | Detector |
+  |-----|-------|----------|
+  | `bias` | L1 | BiasDetector — trend direction |
+  | `ipda` | L1 | IPDACompiler — IPDA phase |
+  | `dealing` | L1 | DealingRangeDetector — 20/40/60-day range |
+  | `eq_cross` | L1 | EquilibriumCrossDetector — equilibrium cross |
+  | `swing` | L1 | SwingDetector — swing highs/lows |
+  | `session` | L1 | SessionKillZoneDetector — killzone timing |
+  | `vol_decay` | L3 | VolatilityDecayDetector — λ₁ entrapment |
+  | `displacement` | L3 | DisplacementDetector — λ₅ order flow burst |
+  | `harmonic` | L3 | HarmonicTrapDetector — λ₃ FFT phase |
+  | `expansion` | L3 | IPDAExpansionPredictor — expansion σ |
+  | `manipulation` | L3 | ManipulationPhaseDetector — λ₄ Judas swing |
+  | `fvg` | L2 | FVGDetectorEngine — fair value gaps |
+  | `ob` | L2 | OrderBlockDetector — order blocks |
+  | `vol_profile` | L2 | VolumeProfileMemoryEngine — TAP density |
+  | `kl` | L4 | KLDivergenceDetector — regime fracture |
+  | `fusion` | Ring 0 | LambdaFusionEngine — OBNFE veto |
+  | `mandra` | Ring 0 | MandraGate — information energy ΔE |
+  | `topology` | Ring 0 | TopologicalFractureDetector — H₁ loops |
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"`.
+</ResponseField>
+
+<ResponseField name="enabled" type="array">
+  List of module keys currently active.
+</ResponseField>
+
+<ResponseField name="disabled" type="array">
+  List of module keys now disabled.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```bash curl
+# Disable the topology and FVG detectors
+curl -X POST http://localhost:8000/api/config/modules \
+  -H "Content-Type: application/json" \
+  -d '{"disabled_modules": ["topology", "fvg"]}'
+```
+
+```python python
+import httpx
+
+r = httpx.post("http://localhost:8000/api/config/modules", json={
+    "disabled_modules": ["topology", "fvg"],
+})
+print(r.json())
+# {"status": "ok", "enabled": ["bias", "ipda", ...], "disabled": ["topology", "fvg"]}
+```
+
+</CodeGroup>
+
+<Warning>
+Disabling Ring 0 modules (`fusion`, `mandra`, `topology`) removes veto authority from those layers. The pipeline will continue running but `r['veto']['trade_allowed']` may return `True` in conditions where those vetoes would normally block execution.
+</Warning>
+
+---
+
+## GET /api/status
+
+Return the current pipeline state: how many bars are loaded, which bar the cursor is on, the current AMD state, and the health of every module.
+
+### Response
+
+<ResponseField name="bars_loaded" type="integer">
+  Total number of bars in the pipeline's current dataset.
+</ResponseField>
+
+<ResponseField name="cursor" type="integer">
+  Index of the next bar to be processed (0-based). Equals `bars_loaded` when the replay is complete.
+</ResponseField>
+
+<ResponseField name="amd_state" type="string">
+  Current AMD state machine value: `"Accumulation"`, `"Manipulation"`, `"Distribution"`, or `"Retracement"`.
+</ResponseField>
+
+<ResponseField name="modules_ok" type="array">
+  Keys of modules that loaded successfully and are active.
+</ResponseField>
+
+<ResponseField name="modules_failed" type="array">
+  Error strings for any module that failed to import.
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+```json
+{
+  "bars_loaded": 300,
+  "cursor": 145,
+  "amd_state": "Manipulation",
+  "modules_ok": ["bias", "ipda", "dealing", "eq_cross", "swing", "session",
+                  "vol_decay", "displacement", "harmonic", "expansion",
+                  "manipulation", "fvg", "ob", "vol_profile", "kl",
+                  "fusion", "mandra", "topology"],
+  "modules_failed": []
+}
+```
+
+---
+
+## GET /api/logs
+
+List all log files available in the `logs/` directory.
+
+### Response
+
+<ResponseField name="log_dir" type="string">
+  Absolute path to the log directory.
+</ResponseField>
+
+<ResponseField name="files" type="array">
+  List of log file names. The five standard streams are:
+
+  | File | Content |
+  |------|---------|
+  | `events.log` | FVGs, AMD transitions, Judas swings, trade signals |
+  | `veto.log` | Every bar's Ring 0 veto decision |
+  | `trades.log` | Trade opens and closes with P&L |
+  | `session.log` | Server start, data loads, live feed events |
+  | `raw_bars.log` | Full JSON per bar (50 MB rotating limit) |
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:8000/api/logs
+```
+
+```json
+{
+  "log_dir": "/home/user/QUIMERIA-HYPERION/logs",
+  "files": ["events.log", "veto.log", "trades.log", "session.log", "raw_bars.log"]
+}
+```
+
+---
+
+## GET /api/logs/{filename}
+
+Read the last N lines of a named log file. Only `.log` files in the log directory can be accessed; path traversal attempts return HTTP 400.
+
+### Path parameters
+
+<ParamField path="filename" type="string" required>
+  Name of the log file, for example `"events.log"`. Must end in `.log` and contain no path separators.
+</ParamField>
+
+### Query parameters
+
+<ParamField query="lines" type="integer" default={100}>
+  Number of lines to return from the end of the file.
+</ParamField>
+
+### Response
+
+<ResponseField name="filename" type="string">
+  Echo of the requested filename.
+</ResponseField>
+
+<ResponseField name="total_lines" type="integer">
+  Total line count in the file.
+</ResponseField>
+
+<ResponseField name="lines" type="array">
+  Array of strings, one per log line, in chronological order.
+</ResponseField>
+
+### Example
+
+```bash
+curl "http://localhost:8000/api/logs/events.log?lines=20"
+```
+
+```json
+{
+  "filename": "events.log",
+  "total_lines": 8432,
+  "lines": [
+    "2026-05-10 09:00:01 [AMD] Accumulation → Manipulation",
+    "2026-05-10 09:05:01 [FVG] Bullish gap detected at 1.09210–1.09180",
+    "..."
+  ]
+}
+```
+
+---
+
+## GET /api/plugins
+
+Return the status of every plugin in the registry, including whether it is enabled, warmed up, and how many bars it has processed.
+
+### Response
+
+<ResponseField name="plugins" type="array">
+  List of plugin status objects.
+
+  <Expandable title="Plugin status object fields">
+    <ResponseField name="name" type="string">
+      Plugin display name, for example `"MarketRhythm"`.
+    </ResponseField>
+    <ResponseField name="layer" type="string">
+      Layer classification: `"L2-ext"` or `"L3-ext"`.
+    </ResponseField>
+    <ResponseField name="sensor" type="string">
+      Sensor ID shown in the frontend bar, for example `"p01"`.
+    </ResponseField>
+    <ResponseField name="enabled" type="boolean">
+      Whether the plugin is currently active.
+    </ResponseField>
+    <ResponseField name="ready" type="boolean">
+      `true` once the warmup bar count has been reached.
+    </ResponseField>
+    <ResponseField name="warmup" type="integer">
+      Minimum bars required before the plugin fires.
+    </ResponseField>
+    <ResponseField name="bars" type="integer">
+      Total bars processed since last reset.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="errors" type="object">
+  Map of class name to error string for any plugin that failed to load.
+</ResponseField>
+
+### Example
+
+```bash
+curl http://localhost:8000/api/plugins
+```
+
+```json
+{
+  "plugins": [
+    {"name": "MarketRhythm",       "layer": "L3-ext", "sensor": "p01", "enabled": true, "ready": true,  "warmup": 64, "bars": 145},
+    {"name": "MarketHeuristic",    "layer": "L3-ext", "sensor": "p02", "enabled": true, "ready": true,  "warmup": 20, "bars": 145},
+    {"name": "MarketVision",       "layer": "L2-ext", "sensor": "p03", "enabled": true, "ready": false, "warmup": 20, "bars": 10},
+    {"name": "MarketSeismology",   "layer": "L3-ext", "sensor": "p04", "enabled": true, "ready": true,  "warmup": 20, "bars": 145},
+    {"name": "FileCarvingEngine",  "layer": "L2-ext", "sensor": "p05", "enabled": true, "ready": true,  "warmup": 20, "bars": 145},
+    {"name": "SignatureScanEngine","layer": "L2-ext", "sensor": "p06", "enabled": true, "ready": true,  "warmup": 20, "bars": 145}
+  ],
+  "errors": {}
+}
+```
+
+---
+
+## POST /api/plugins/toggle
+
+Enable a specific set of plugins by name. Plugins not in the `enabled` list are disabled.
+
+### Request body
+
+<ParamField body="enabled" type="array" required>
+  List of plugin names to enable. Any plugin whose name is absent from this list will be disabled.
+
+  ```json
+  {"enabled": ["MarketRhythm", "MarketHeuristic"]}
+  ```
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"`.
+</ResponseField>
+
+<ResponseField name="enabled" type="array">
+  Echo of the enabled list.
+</ResponseField>
+
+### Example
+
+```bash
+curl -X POST http://localhost:8000/api/plugins/toggle \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": ["MarketRhythm", "MarketSeismology"]}'
+```
+
+```json
+{"status": "ok", "enabled": ["MarketRhythm", "MarketSeismology"]}
+```

@@ -1,0 +1,220 @@
+---
+title: "Live exchange feeds: Bitget, Fyers, and Coinbase"
+description: "Configure real-time market data feeds from Bitget REST polling, Fyers NSE WebSocket, and Coinbase Advanced Trade for the SMK live pipeline."
+---
+
+QUIMERIA-HYPERION supports live market data from three exchange integrations: Bitget via REST polling (`backend/realtime.py`), Fyers for NSE equities (`integrations/smk_fyers_integration.py`), and Coinbase Advanced Trade (`integrations/coinbase/`). Each feed normalizes incoming ticks or candles into the same OHLCV format used by the SMK pipeline before broadcasting results over the WebSocket to connected dashboard clients.
+
+<Warning>
+  Never commit API keys to version control. Store all credentials in a `.env` file at the project root or export them as environment variables. The `.gitignore` already excludes `.env`.
+</Warning>
+
+---
+
+## API key configuration
+
+Create a `.env` file in the project root and populate the credentials for the exchanges you intend to use. The launchers load this file automatically.
+
+```bash
+# Bitget
+BITGET_API_KEY=your_key
+BITGET_SECRET=your_secret
+BITGET_PASSPHRASE=your_passphrase
+
+# Fyers (NSE)
+FYERS_APP_ID=your_app_id
+FYERS_SECRET=your_secret
+
+# TradingView webhook targets (MEXC / Bybit / OKX)
+TV_API_KEY_MEXC=your_mexc_api_key
+TV_SECRET_KEY_MEXC=your_mexc_secret
+TV_API_KEY_BYBIT=your_bybit_api_key
+TV_SECRET_KEY_BYBIT=your_bybit_secret
+TV_API_KEY_OKX=your_okx_api_key
+TV_SECRET_KEY_OKX=your_okx_secret
+TV_PASSPHRASE_OKX=your_okx_passphrase   # required for OKX
+TV_TRADE_MODE=spot
+```
+
+<Note>
+  Public Bitget candle endpoints work without credentials. An API key is only required for authenticated endpoints or higher rate limits.
+</Note>
+
+---
+
+## Bitget live feed
+
+The `LiveFeed` class in `backend/realtime.py` polls the Bitget v2 spot candle endpoint on a configurable interval. When a new closed candle is detected, it runs the full SMK pipeline step and broadcasts the result to every connected WebSocket client.
+
+### Supported granularities
+
+| Interval | Bitget string | Poll period |
+|----------|--------------|-------------|
+| `1m` | `1min` | 60 s |
+| `3m` | `3min` | 180 s |
+| `5m` | `5min` | 300 s |
+| `15m` | `15min` | 900 s |
+| `1h` | `1H` | 3600 s |
+
+### Starting the live feed
+
+Send a `POST` to `/api/live/start` with the symbol and granularity. The feed attaches to the existing SMK pipeline instance on the server.
+
+<Tabs>
+  <Tab title="curl">
+    ```bash
+    curl -X POST http://localhost:8000/api/live/start \
+      -H "Content-Type: application/json" \
+      -d '{
+        "symbol":      "EURUSDT",
+        "granularity": "1m",
+        "api_key":     ""
+      }'
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    import httpx
+
+    r = httpx.post(
+        "http://localhost:8000/api/live/start",
+        json={
+            "symbol":      "EURUSDT",
+            "granularity": "1m",
+            "api_key":     "",          # omit or pass BITGET_API_KEY
+        },
+    )
+    print(r.json())
+    # {"status": "started", "symbol": "EURUSDT", "granularity": "1m"}
+    ```
+  </Tab>
+</Tabs>
+
+### Stopping the live feed
+
+```bash
+curl -X POST http://localhost:8000/api/live/stop
+```
+
+```json
+{"status": "stopped"}
+```
+
+### WebSocket live stream
+
+The frontend connects to `ws://localhost:8000/ws/live` to receive real-time bar payloads. Each message is the full `step()` result dict including sensor scores, veto decisions, and execution output.
+
+```python
+import asyncio, websockets, json
+
+async def watch_live():
+    uri = "ws://localhost:8000/ws/live"
+    async with websockets.connect(uri) as ws:
+        async for raw in ws:
+            bar = json.loads(raw)
+            print(bar["bar"], bar["veto"]["trade_allowed"])
+
+asyncio.run(watch_live())
+```
+
+---
+
+## Fyers (NSE) integration
+
+`integrations/smk_fyers_integration.py` wraps the `fyers-apiv3` SDK and connects the SMK lambda fusion engine to Fyers order execution. The integration supports fixed-percent, trailing, and lambda-adaptive profit targets.
+
+### Required credentials
+
+| Variable | Description |
+|----------|-------------|
+| `FYERS_APP_ID` | Your Fyers API v3 App ID |
+| `FYERS_SECRET` | Your Fyers API v3 secret |
+
+### Features
+
+- `TradePosition` dataclass tracks entry price, peak/trough prices, stop loss, and take profit per position
+- `ProfitTarget` modes: `FIXED_PERCENT` (default 2%), `TRAILING`, and `LAMBDA_ADAPTIVE`
+- Integrates with `LambdaFusionEngine` and `Lambda7MacroGate` when SMK modules are available; falls back to standalone mode otherwise
+- Rate limiter (`core.rate_limiter`) and `retry_with_backoff` guard all Fyers API calls
+
+<Note>
+  The Fyers integration loads SMK lambda sensors (`LambdaFusionEngine`, `Lambda7MacroGate`, `LightConeViolationDetector`) on import. If these modules are unavailable, it runs in standalone mode and logs a warning.
+</Note>
+
+### Order status lifecycle
+
+```
+PENDING → SUBMITTED → PARTIALLY_FILLED → FILLED
+                                       → REJECTED
+                                       → CANCELLED
+```
+
+---
+
+## Coinbase Advanced Trade integration
+
+The `integrations/coinbase/` package provides a modular client for the Coinbase Advanced Trade API, organized by resource type.
+
+| Module | Purpose |
+|--------|---------|
+| `auth.py` | Request signing and authentication |
+| `coinbase_unified_client.py` | High-level client combining all sub-APIs |
+| `market_data_api.py` | OHLCV candles and order book snapshots |
+| `public_market_data.py` | Unauthenticated market data endpoints |
+| `order_api.py` | Place, cancel, and list orders |
+| `account_balance_api.py` | Account and balance queries |
+| `perpetuals_api.py` | Perpetuals contract endpoints |
+| `convert_api.py` | Currency conversion |
+| `transaction_api.py` | Transaction history |
+
+Use `coinbase_unified_client.CoinbaseUnifiedClient` as the entry point. It composes all sub-APIs under a single authenticated session.
+
+---
+
+## Generic market integration
+
+`integrations/smk_market_integration.py` provides `EnhancedOrderBook`, a general-purpose order book with profit tracking that works independently of any specific exchange.
+
+```python
+from integrations.smk_market_integration import EnhancedOrderBook
+
+ob = EnhancedOrderBook(symbol_id=1)
+ob.profit_target_pct = 2.0   # 2% default profit target
+
+# Register a callback to receive visual signals
+ob.register_signal_callback(lambda sig: print(sig))
+
+# Add an order with optional lambda scores
+ob.add_order(
+    order_id=1001,
+    side="BUY",
+    price=1.10512,
+    qty=100_000,
+    profit_target_pct=2.0,
+    lambda_scores={"lambda_fusion": 0.82, "lambda7": 0.91},
+)
+```
+
+Signal callbacks receive a dict with `type`, `price`, `side`, and `lambda_scores` keys, which the dashboard uses to render trade markers on the TradingView chart.
+
+---
+
+## Monitoring live feed health
+
+Poll `GET /api/status` to check whether the live feed task is running and how many WebSocket clients are connected:
+
+```bash
+curl http://localhost:8000/api/status
+```
+
+```json
+{
+  "live_feed": {
+    "running": true,
+    "symbol":  "EURUSDT",
+    "granularity": "1m",
+    "clients": 2,
+    "last_bar_ts": 1705276800
+  }
+}
+```

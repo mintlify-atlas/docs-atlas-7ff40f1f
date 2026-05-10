@@ -1,0 +1,239 @@
+---
+title: "Data loading endpoints: CSV, Bitget, OANDA, sample"
+description: "Load OHLCV market data into the SMK pipeline from four sources: CSV upload, Bitget REST API, OANDA v20 API, or the built-in synthetic sample."
+---
+
+Four POST endpoints load OHLCV bars into the SMK pipeline. Each call fully replaces the pipeline's current dataset and resets the bar cursor to zero. All loaders normalize output to `{time, open, high, low, close, volume}` with `time` as a plain Unix timestamp integer.
+
+## POST /api/load/csv
+
+Load bars from a CSV string. Supports MT4, MT5, TradingView ISO, TradingView US date format, and Dukascopy UTC format. Column detection is automatic when `source_hint` is `"auto"`.
+
+### Request body
+
+<ParamField body="text" type="string" required>
+  Full CSV content as a plain string. Include the header row. The parser auto-detects delimiters (comma, semicolon, tab).
+</ParamField>
+
+<ParamField body="filename" type="string" default="upload.csv">
+  Display name logged to `session.log`. Does not affect parsing.
+</ParamField>
+
+<ParamField body="source_hint" type="string" default="auto">
+  Parser hint. Accepted values: `"mt4"`, `"mt5"`, `"tradingview"`, `"dukascopy"`, `"auto"`.
+
+  | Value | Expected date format |
+  |-------|---------------------|
+  | `mt4` | `2024.01.15,00:00` |
+  | `mt5` | `2024.01.15,00:00:00` with `TICKVOL` column |
+  | `tradingview` | `2024-01-15T00:00:00+00:00` (ISO) or `01/15/2024,00:00` (US) |
+  | `dukascopy` | `19.03.2026 12:00:00.000 UTC` |
+  | `auto` | Tries all formats in order |
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  Always `"ok"` on success.
+</ResponseField>
+
+<ResponseField name="count" type="integer">
+  Number of valid bars loaded.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  Echo of the `filename` parameter.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:8000/api/load/csv \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "DATE,TIME,OPEN,HIGH,LOW,CLOSE,VOL\n2024.01.15,00:00,1.09100,1.09250,1.09050,1.09200,1250",
+    "filename": "EURUSD_H1.csv",
+    "source_hint": "mt4"
+  }'
+```
+
+```python python
+import httpx, pathlib
+
+csv_text = pathlib.Path("EURUSD_H1.csv").read_text()
+r = httpx.post("http://localhost:8000/api/load/csv", json={
+    "text": csv_text,
+    "filename": "EURUSD_H1.csv",
+    "source_hint": "mt4",
+})
+print(r.json())  # {"status": "ok", "count": 300, "source": "EURUSD_H1.csv"}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/load/bitget
+
+Fetch candles from Bitget spot market via the Bitget v2 REST API and load them into the pipeline.
+
+### Request body
+
+<ParamField body="api_key" type="string" required>
+  Your Bitget API key. Generate one from the Bitget API Management page.
+</ParamField>
+
+<ParamField body="api_secret" type="string" required>
+  Your Bitget API secret.
+</ParamField>
+
+<ParamField body="symbol" type="string" default="EURUSDT">
+  Trading pair symbol in Bitget spot format, for example `"BTCUSDT"`, `"ETHUSDT"`, `"EURUSDT"`.
+</ParamField>
+
+<ParamField body="granularity" type="string" default="5m">
+  Candle interval. Accepted values: `"1m"`, `"3m"`, `"5m"`, `"15m"`, `"30m"`, `"1H"`, `"4H"`, `"1D"`.
+</ParamField>
+
+<ParamField body="limit" type="integer" default={300}>
+  Number of bars to fetch. Maximum is 1000 per Bitget API limits.
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"` on success.
+</ResponseField>
+
+<ResponseField name="count" type="integer">
+  Number of bars loaded.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  `"BITGET:{symbol}"`, for example `"BITGET:EURUSDT"`.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:8000/api/load/bitget \
+  -H "Content-Type: application/json" \
+  -d '{
+    "api_key": "bg_xxxxxxxx",
+    "api_secret": "xxxxxxxx",
+    "symbol": "EURUSDT",
+    "granularity": "5m",
+    "limit": 300
+  }'
+```
+
+```python python
+import httpx
+
+r = httpx.post("http://localhost:8000/api/load/bitget", json={
+    "api_key": "bg_xxxxxxxx",
+    "api_secret": "xxxxxxxx",
+    "symbol": "EURUSDT",
+    "granularity": "5m",
+    "limit": 300,
+})
+print(r.json())  # {"status": "ok", "count": 300, "source": "BITGET:EURUSDT"}
+```
+
+</CodeGroup>
+
+<Note>
+Bitget Futures data (no API key required) is available at `POST /api/load/bitget-futures` with `symbol`, `granularity`, and `limit` fields.
+</Note>
+
+---
+
+## POST /api/load/oanda
+
+Fetch candles from OANDA via the v20 REST API.
+
+### Request body
+
+<ParamField body="token" type="string" required>
+  Your OANDA personal access token (PAT). Generate one from the OANDA API portal.
+</ParamField>
+
+<ParamField body="account_id" type="string" required>
+  Your OANDA account ID, for example `"001-001-1234567-001"`.
+</ParamField>
+
+<ParamField body="instrument" type="string" default="EUR_USD">
+  OANDA instrument name using underscore notation, for example `"EUR_USD"`, `"GBP_USD"`, `"XAU_USD"`.
+</ParamField>
+
+<ParamField body="granularity" type="string" default="M5">
+  Candle granularity in OANDA format. Accepted values: `"M1"`, `"M5"`, `"M15"`, `"M30"`, `"H1"`, `"H4"`, `"D"`.
+</ParamField>
+
+<ParamField body="count" type="integer" default={300}>
+  Number of candles to fetch. Maximum 5000 per OANDA API limits.
+</ParamField>
+
+### Response
+
+<ResponseField name="status" type="string">
+  `"ok"` on success.
+</ResponseField>
+
+<ResponseField name="count" type="integer">
+  Number of bars loaded.
+</ResponseField>
+
+<ResponseField name="source" type="string">
+  `"OANDA:{instrument}"`, for example `"OANDA:EUR_USD"`.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://localhost:8000/api/load/oanda \
+  -H "Content-Type: application/json" \
+  -d '{
+    "token": "your-oanda-token",
+    "account_id": "001-001-1234567-001",
+    "instrument": "EUR_USD",
+    "granularity": "M5",
+    "count": 300
+  }'
+```
+
+```python python
+import httpx
+
+r = httpx.post("http://localhost:8000/api/load/oanda", json={
+    "token": "your-oanda-token",
+    "account_id": "001-001-1234567-001",
+    "instrument": "EUR_USD",
+    "granularity": "M5",
+    "count": 300,
+})
+print(r.json())  # {"status": "ok", "count": 300, "source": "OANDA:EUR_USD"}
+```
+
+</CodeGroup>
+
+---
+
+## POST /api/load/sample
+
+This endpoint is currently disabled. Synthetic data generation has been removed; use CSV, Bitget, or OANDA to load real market data.
+
+### Response
+
+Returns HTTP `403 Forbidden` with a message directing you to a real data source.
+
+```bash
+curl -X POST http://localhost:8000/api/load/sample
+# HTTP 403: "Synthetic data generation is disabled — load real market data via CSV, Bitget, or OANDA."
+```

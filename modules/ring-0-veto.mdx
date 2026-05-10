@@ -1,0 +1,217 @@
+---
+title: "Ring 0 veto: six hard-stop execution guards"
+description: "Reference for all six Ring 0 veto conditions, their trigger values, error codes, and the decision tree that governs trade_allowed in the step() result."
+---
+
+Ring 0 is the final execution gate of the Sovereign Market Kernel. It sits between the Lambda Fusion Engine and the AEGIS bridge and holds absolute veto authority over every trade. If any Ring 0 condition is met, `r['veto']['trade_allowed']` is set to `False` and no order action occurs, regardless of the fused signal strength or AMD phase. Veto decisions are written to `logs/veto.log` on every bar.
+
+The six veto conditions are evaluated sequentially on each call to `SMKPipeline.step()`. The first condition that triggers short-circuits the remaining checks and sets the appropriate error code.
+
+## Veto conditions
+
+<Warning>
+**MANDRA:ΔE\<0** — Negative information energy gain
+
+**Source:** `risk/mandra_kernels.py` via `MandraGate`
+
+The Mandra Gate computes the information entropy differential ΔE between the proposed trade and current market state. ΔE represents how much new, non-redundant information the trade decision adds to the system. A negative or insufficient ΔE means the market is too chaotic or too repetitive to act on — the signal carries no predictive edge.
+
+**Trigger:** `ΔE < ΔE_min`
+
+| Parameter | Default | Adaptive range |
+|-----------|---------|---------------|
+| `ΔE_min` | `0.02` | `0.005 – 0.08` |
+
+**Error code:** `ERR_MANDRA_ENTROPY`
+
+**Resolution:** Stop execution. The market is in a chaos regime. Wait for regime stabilization before resuming. Do not adjust the threshold to force through a trade — the Mandra Gate is the last line of defense against catastrophic drawdowns.
+
+```python
+# Breakage-prevention rule from CLAUDE.md
+# NEVER execute without Mandra Gate ΔE > 0.02 confirmation
+```
+</Warning>
+
+<Warning>
+**TOPO:H1\_FRACTURE** — Persistent homology loop sum exceeds threshold
+
+**Source:** `detectors/topological_fracture_detector.py` via `TopologicalFractureDetector`
+
+The topological detector maps price, volume, and order flow imbalance into a point cloud and runs **persistent homology** (via `ripser`) to measure the H₁ (one-dimensional) topological structure. H₁ loops that persist across scale represent structural fractures in the price manifold — geometrically, price is trapped in a distorted topology that makes directional delivery unreliable.
+
+**Trigger:** `sum(H₁ lifetimes) > fracture_limit`
+
+| Parameter | Default |
+|-----------|---------|
+| `fracture_limit` | `0.5` |
+| `persistence_threshold` | `0.6` |
+
+```python
+# topological_fracture_detector.py — distortion score
+lifetimes = [death - birth for birth, death in h1_intervals
+             if not np.isinf(death)]
+distortion_score = np.sum(lifetimes)
+is_fractured = distortion_score > self.fracture_limit
+```
+
+**Error code:** `HALT_H1_LOOP`
+
+**Resolution:** Wait for manifold compaction — H₁ persistence score must drop below `fracture_limit` before re-enabling execution. This typically resolves after the manipulation phase completes and price establishes a new directional leg.
+</Warning>
+
+<Warning>
+**FUSION:LAMBDA\_VETO** — One or more λ sensors issued a hard veto
+
+**Source:** `core/kernel/lambda_fusion_engine.py`
+
+The Lambda Fusion Engine inspects each sensor's telemetry for hard-veto flags before computing `p_fused`. If any sensor's veto flag is `True`, the fusion engine sets `trade_allowed = False` immediately and records `FUSION:LAMBDA_VETO`.
+
+**Triggered by:**
+- `λ₃`: `is_inverted = True` (Liar State)
+- `λ₅`: `is_vetoed = True` (displacement direction conflict)
+- `λ₇`: `dxy_veto_triggered = True` (macro causality conflict)
+- `λ₈`: `kill_switch_triggered = True` (light-cone violation severity > 0.7)
+
+**Resolution:** Identify which sensor fired the veto from `logs/veto.log`, then follow the sensor-specific resolution steps in the [lambda sensors reference](/modules/lambda-sensors).
+</Warning>
+
+<Warning>
+**L3:LIAR\_STATE** — FFT phase inversion exceeds π/2
+
+**Source:** `lambda_sensors/harmonic_trap_detector.py` via `HarmonicTrapDetector`
+
+A Liar State is the λ₃ specific sub-condition within `FUSION:LAMBDA_VETO`. It is listed separately in Ring 0 because it has its own error code and resolution path. The FFT-based phase comparator detects that predicted and actual dominant frequencies are inverted beyond the 90-degree threshold — the market's harmonic structure is running in reverse relative to model expectation.
+
+**Trigger:** `abs(φ_predicted − φ_actual) > π/2`
+
+| Parameter | Default | Adaptive range |
+|-----------|---------|---------------|
+| `threshold` | `π/2` (≈ 1.5708 rad) | `π/4 – 3π/4` |
+
+```python
+# harmonic_trap_detector.py — phase inversion check
+phase_diff  = np.abs(phi_pred - phi_act)
+is_inverted = phase_diff > self.threshold  # > π/2
+status = "DISSONANT: λ3 VETO" if is_inverted else "IN_HARMONY"
+```
+
+**Error code:** `VETO_LIAR_STATE`
+
+**Resolution:** Wait for `φ_diff < π/2`. Do not attempt manual override. The λ₃ Harmonic Trap Paradox may generate false Liar States during ultra-high-frequency volatility; if the veto persists for more than 3 bars alongside strong AMD structural confirmation, flag for sensor recalibration review.
+</Warning>
+
+<Warning>
+**KL:REGIME\_FRACTURE** — KL divergence exceeds 1.3× threshold
+
+**Source:** `detectors/kl_divergence_detector.py` via `KLDivergenceDetector`
+
+The KL Divergence Detector measures the Kullback-Leibler distance between the current price-volume distribution and the calibrated reference distribution (the "stable manifold"). A high KL score means the current regime has drifted so far from the historical baseline that pattern memory and structural assumptions are no longer valid.
+
+**Trigger:** `KL(P_current ‖ Q_reference) > threshold × 1.3`
+
+| Parameter | Default | Critical multiplier |
+|-----------|---------|-------------------|
+| `threshold` | `0.5` | `1.3×` → Ring 0 veto |
+| `bins` | `20` | Distribution resolution |
+
+```python
+# kl_divergence_detector.py — regime fracture detection
+kl_score  = entropy(p_curr, q_ref)
+is_stable = kl_score < self.threshold  # < 0.5 → IN_HARMONY
+
+if kl_score > self.threshold * 2:      # > 1.0 → CRITICAL
+    status = "CRITICAL_GEOMETRY_BREAK: STASIS_REQUIRED"
+```
+
+**Status levels:**
+
+| KL score | Status | Action |
+|----------|--------|--------|
+| `< threshold` | `IN_HARMONY` | Normal operation |
+| `threshold – threshold×1.3` | `REGIME_FRACTURE_DETECTED` | Elevated caution |
+| `> threshold×1.3` | Ring 0 veto fires | Execution halted |
+| `> threshold×2` | `CRITICAL_GEOMETRY_BREAK` | Manual recalibration required |
+
+**Error code:** `ERR_REGIME_FRACTURE`
+
+**Resolution:** Manual manifold recalibration via `KLDivergenceDetector.calibrate_manifold()` with updated historical data. The reference distribution must be re-anchored to the current regime before execution resumes.
+</Warning>
+
+<Warning>
+**CONF:INSUFFICIENT** — Fusion confidence below minimum threshold
+
+**Source:** `core/kernel/lambda_fusion_engine.py`
+
+After aggregating all sensor scores, the fusion engine computes an overall confidence value `p_fused`. If the weighted fusion result falls below `0.2`, no individual sensor fired a hard veto but the collective evidence is too weak to justify a trade. This veto prevents execution on ambiguous setups where sensors are split or weakly aligned.
+
+**Trigger:** `p_fused < 0.2`
+
+**Resolution:** Wait for sensor alignment to strengthen. Common causes:
+- Multiple sensors in neutral state (no fire, no veto)
+- AMD phase is Consolidation and no killzone is active
+- λ₁ entrapment has not yet reached critical mass
+</Warning>
+
+## Veto decision tree
+
+The diagram below summarizes the sequential evaluation flow on each bar:
+
+```
+SMKPipeline.step()
+    │
+    ├── MandraGate.check(ΔE)
+    │       ΔE < 0.02 ──► ERR_MANDRA_ENTROPY → trade_allowed = False
+    │
+    ├── TopologicalFractureDetector.detect_fracture()
+    │       is_fractured ──► HALT_H1_LOOP → trade_allowed = False
+    │
+    ├── LambdaFusionEngine.fuse()
+    │       any λ hard veto ──► FUSION:LAMBDA_VETO → trade_allowed = False
+    │           └── λ₃ phase inversion ──► VETO_LIAR_STATE
+    │
+    ├── KLDivergenceDetector.detect_drift()
+    │       kl > 1.3× threshold ──► ERR_REGIME_FRACTURE → trade_allowed = False
+    │
+    ├── p_fused < 0.2 ──► CONF:INSUFFICIENT → trade_allowed = False
+    │
+    └── All clear ──► trade_allowed = True → AEGIS bridge executes
+```
+
+## Accessing the veto decision
+
+The veto result is written to the `step()` result dict under the `veto` key:
+
+```python
+result = pipeline.step(bar)
+
+# Primary trade permission
+trade_allowed = result['veto']['trade_allowed']   # bool
+
+# Full veto context
+veto_active   = result['veto_active']             # bool
+gate_status   = result['gate_status']             # "OPEN" or "VETOED"
+```
+
+The AEGIS bridge (`backend/aegis_bridge.py`) reads `r['veto']['trade_allowed']` before issuing any order. This check is unconditional — the bridge has no bypass mechanism.
+
+## Error codes
+
+| Code | Root cause | Resolution |
+|------|------------|------------|
+| `ERR_REGIME_FRACTURE` | KL divergence > 2× threshold | Manual manifold recalibration via `calibrate_manifold()` |
+| `VETO_LIAR_STATE` | λ₃ phase inversion detected | Wait for `φ_diff < π/2` |
+| `HALT_H1_LOOP` | Topological fracture (H₁ loops) | Wait for manifold compaction (H₁ reset) |
+| `ERR_MANDRA_ENTROPY` | ΔE is negative | Stop execution — market is too chaotic |
+
+<Info>
+All error codes appear in `logs/veto.log`. Each log entry includes the bar timestamp, the triggering condition, and the current threshold values. Use `GET /api/logs/veto.log?lines=200` to inspect recent decisions.
+</Info>
+
+<CardGroup cols={2}>
+  <Card title="Lambda sensors" icon="wave-sine" href="/modules/lambda-sensors">
+    The eight sensors that feed into the Ring 0 fusion check
+  </Card>
+  <Card title="SMART-EXE intelligence" icon="brain" href="/modules/smart-intelligence">
+    FAISS memory and GRU predictor in the execution layer
+  </Card>
+</CardGroup>

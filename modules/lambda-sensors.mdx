@@ -1,0 +1,282 @@
+---
+title: "Lambda sensors λ₁–λ₈: real-time market sensing"
+description: "Complete reference for all eight lambda sensors — thresholds, veto conditions, output telemetry, and how each sensor feeds the Lambda Fusion Engine."
+---
+
+The eight lambda sensors form Layer 3 of the Sovereign Market Kernel. Each sensor monitors a distinct dimension of market behavior — volatility, time, spectral phase, manipulation, displacement, macro trend, causal correlation, and information leakage. On every bar, the sensors produce telemetry structs that the **Lambda Fusion Engine** combines into a single weighted probability (`p_fused`) and a binary trade permission. A sensor either **fires** (contributes positively to fusion) or **vetoes** (halts execution entirely, regardless of other signals).
+
+The sensors share a common interface defined in `lambda_sensors/base_sensor.py`. Each implements `step()` or an equivalent method that returns a plain-Python dataclass. All outputs are sanitized through `smk_pipeline._sanitize()` before leaving the pipeline.
+
+## Sensor overview
+
+| Sensor | Name | File | Veto condition |
+|--------|------|------|----------------|
+| λ₁ | Volatility Decay | `volatility_decay_detector.py` | `V_t / ATR₂₀ < 0.7` → entrapment |
+| λ₂ | Killzone Timing | `expansion_predictor.py` + session detector | Outside London / NY window |
+| λ₃ | Harmonic Inversion | `harmonic_trap_detector.py` | `φ_diff > π/2` → Liar State |
+| λ₄ | Manipulation Phase | `manipulation_detector.py` | `score ≥ 70` during signal window |
+| λ₅ | Displacement | `displacement_detector.py` | Directional conflict with macro bias |
+| λ₆ | Macro Bias | `displacement_detector.py` (direction field) | Bias flip during open position |
+| λ₇ | Macro Causality | `macro_causality_gate.py` | DXY divergence > 0.20% with conflicting direction |
+| λ₈ | Light-Cone Violation | `light_cone_violation.py` | Kill-switch at severity > 0.7 |
+
+## Detailed sensor reference
+
+<AccordionGroup>
+  <Accordion title="λ₁ Volatility Decay (Entrapment)">
+    **File:** `lambda_sensors/volatility_decay_detector.py`
+
+    λ₁ measures the rate at which intra-range volatility exhausts itself — the precursor to an institutional displacement move. It computes the **Price Variation Integral** (V_t), the sum of absolute close-to-close changes over the current window, and benchmarks it against ATR₂₀.
+
+    **Trigger threshold:**
+
+    | Parameter | Default | Adaptive range |
+    |-----------|---------|---------------|
+    | `delta` (volatility ratio threshold) | `0.7` | `0.5 – 0.8` |
+    | `tau_max` (stagnation limit, bars) | `20` | — |
+
+    ```python
+    # volatility_decay_detector.py
+    v_t = self.calculate_price_variation(close_prices)
+    vol_ratio = v_t / (atr20 + 1e-9)
+
+    # λ₁ Condition: Volatility Ratio < 0.7
+    is_entrapped = vol_ratio < self.delta
+    ```
+
+    **Telemetry fields:**
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `volatility_ratio` | float | Current V_t / ATR₂₀ |
+    | `is_entrapped` | bool | True when ratio < delta |
+    | `latent_energy_score` | float | `0.5 × stasis_timer²` — models institutional pressure |
+    | `time_in_stasis` | int | Consecutive bars in entrapment |
+    | `status` | str | `PHASE_ENTRAPMENT_ACTIVE`, `CRITICAL_MASS_EXPANSION_IMMINENT`, or `NORMAL_DELIVERY` |
+
+    **Fire vs. veto:** λ₁ does not issue a hard veto. Instead, `is_entrapped = True` is a prerequisite condition that the expansion predictor uses to elevate `p_amp`. When `time_in_stasis > tau_max`, the status shifts to `CRITICAL_MASS_EXPANSION_IMMINENT`, signaling that a displacement move is overdue.
+
+    <Warning>
+      Always wipe the ATR₂₀ cache when upgrading to v1.1. Stale ATR values bias the volatility ratio and may suppress λ₁ even during genuine entrapment.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="λ₂ Killzone Timing">
+    **File:** `core/detectors/` (`SessionKillZoneDetector`)
+
+    λ₂ gates all signals to high-liquidity session windows. Trades outside a killzone receive a timing veto regardless of structural or sensor alignment. The two primary killzones are:
+
+    | Session | UTC window | Characteristics |
+    |---------|-----------|-----------------|
+    | London open | 07:00 – 09:00 | Highest manipulation frequency; Judas Swing most common |
+    | New York open | 13:30 – 15:30 | Primary distribution moves; DXY correlation strongest |
+
+    **Fire vs. veto:** If the current bar timestamp falls outside both windows, the session detector returns `active = False`. The Lambda Fusion Engine applies a zero weight to all sensors during inactive periods, effectively suppressing execution.
+  </Accordion>
+
+  <Accordion title="λ₃ Harmonic Inversion (FFT Phase)">
+    **File:** `lambda_sensors/harmonic_trap_detector.py`
+
+    λ₃ runs an FFT-based spectral comparison between the model's predicted price trajectory and actual prices. When the dominant frequency components are phase-inverted beyond a threshold, the market is in a **Liar State** — harmonic traps and reverse periods where price moves opposite to structural expectation.
+
+    **Trigger threshold:**
+
+    | Parameter | Default | Adaptive range |
+    |-----------|---------|---------------|
+    | `threshold` (phase diff) | `π/2` (≈ 1.5708 rad) | `π/4 – 3π/4` |
+    | `lookback` (FFT window) | `64 bars` | — |
+
+    ```python
+    # harmonic_trap_detector.py
+    phi_pred, _ = self._extract_dominant_phase(predicted_prices[-self.lookback:])
+    phi_act, _  = self._extract_dominant_phase(actual_prices[-self.lookback:])
+
+    phase_diff = np.abs(phi_pred - phi_act)
+    is_inverted = phase_diff > self.threshold  # > π/2 → HALT
+    ```
+
+    **Trap types:**
+
+    | Type | Condition | Action |
+    |------|-----------|--------|
+    | `PHASE_INVERSION` | `phase_diff > π/2` | Hard veto (`VETO_LIAR_STATE`) |
+    | `FREQUENCY_DOUBLING` | `freq_act > freq_pred × 1.8` | Warning; no hard veto |
+
+    **Fire vs. veto:** `is_inverted = True` emits `status = "DISSONANT: λ3 VETO"` and sets the Ring 0 error code to `VETO_LIAR_STATE`. Execution halts until `φ_diff` returns below `π/2`.
+
+    <Warning>
+      The λ₃ Harmonic Trap Paradox: during ultra-high-frequency volatility bursts, λ₃ may over-veto even when structural DNA is bullish. Monitor for Opportunity Decay if veto persists more than 3 consecutive bars with strong AMD confirmation.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="λ₄ Manipulation Phase (Judas Swing)">
+    **File:** `lambda_sensors/manipulation_detector.py`
+
+    λ₄ scores the probability that the current bar represents an institutional stop hunt. It checks three independent signals against the 20/40/60-day IPDA ranges.
+
+    **Scoring model:**
+
+    | Signal | Condition | Score |
+    |--------|-----------|-------|
+    | IPDA range touch | Price sweeps H/L node | +40 |
+    | Wick signature | `wick_size / body > 3.0` | +30 |
+    | Volume anomaly | `volume > 3 × avg_vol` | +30 |
+
+    ```python
+    # manipulation_detector.py — composite score
+    is_active = score >= self.anomaly_threshold  # default 70
+    status = f"MANIPULATION_DETECTED at {detected_level}" if is_active else "STABLE"
+    ```
+
+    **Fire vs. veto:** A confirmed manipulation event (`is_active = True`) is a **fire** condition — it confirms AMD phase transition from Accumulate to Manipulate and increases fusion weight for λ₅. It becomes a veto if a signal is already open in the direction of the sweep (stop-hunt risk).
+  </Accordion>
+
+  <Accordion title="λ₅ Displacement (Institutional Order Flow)">
+    **File:** `lambda_sensors/displacement_detector.py`
+
+    λ₅ validates whether a candle represents genuine institutional order flow rather than retail noise. It checks two geometric constraints simultaneously.
+
+    **Displacement criteria:**
+
+    | Constraint | Condition |
+    |------------|-----------|
+    | Large range | `candle_range > k × ATR₂₀` (default `k = 1.2`) |
+    | Strong body | `body / range ≥ 0.70` (close in top/bottom 30%) |
+
+    ```python
+    # displacement_detector.py — λ₅ classification
+    is_large_range = candle_range > (self.k * atr20)
+    is_bull_disp   = close > open and (close - low) / range > 0.7
+    is_bear_disp   = close < open and (close - low) / range < 0.3
+
+    is_disp = is_large_range and (is_bull_disp or is_bear_disp) and body_ratio >= self.body_min
+    ```
+
+    **Directional veto:** If `expected_direction` (from λ₆ macro bias) conflicts with the displacement direction, `is_vetoed = True` fires `status = "HALTED: λ6 DISPLACEMENT VETO"`.
+
+    **Telemetry fields:**
+
+    | Field | Description |
+    |-------|-------------|
+    | `is_displacement` | True if all criteria met |
+    | `direction` | `1` (bullish), `-1` (bearish), `0` (none) |
+    | `body_ratio` | Body as fraction of total range |
+    | `range_mult` | Range divided by ATR₂₀ |
+    | `is_vetoed` | Direction conflict with macro bias |
+  </Accordion>
+
+  <Accordion title="λ₆ Macro Bias">
+    **File:** `core/detectors/BiasDetector`
+
+    λ₆ determines the high-level structural bias — bullish or bearish — from the IPDA dealing range position and equilibrium cross. It acts as the directional anchor for all other sensors. A confirmed bias is required before the fusion engine generates any long or short signal.
+
+    **Fire vs. veto:** λ₆ does not issue a hard veto. It provides `expected_direction` to λ₅ and to the Order Block Detector. If the bias is `NEUTRAL` (price at equilibrium), the expansion predictor suppresses `p_amp` regardless of λ₁ status.
+  </Accordion>
+
+  <Accordion title="λ₇ Macro Causality (DXY/SPX)">
+    **File:** `lambda_sensors/macro_causality_gate.py`
+
+    λ₇ validates that a trading signal is consistent with the macro causal structure — specifically the DXY correlation and SPX risk regime. It also runs **SMT Divergence** detection to spot hidden bullish or bearish divergences between correlated pairs.
+
+    **Configuration defaults:**
+
+    | Parameter | Default | Description |
+    |-----------|---------|-------------|
+    | `dxy_divergence_threshold` | `0.20%` | Maximum tolerated DXY move against signal |
+    | `dxy_correlation_window` | `20 bars` | Rolling window for correlation |
+    | `smt_lookback` | `15 bars` | SMT divergence detection window |
+
+    ```python
+    # macro_causality_gate.py — veto logic
+    if dxy_divergence > config.dxy_divergence_threshold:
+        if direction == 1 and dxy_change > 0:
+            veto = True  # Long signal vs. DXY strength → EUR/USD structural conflict
+        elif direction == -1 and dxy_change < 0:
+            veto = True  # Short signal vs. DXY weakness → structural conflict
+    ```
+
+    **Risk regime output:**
+
+    | Regime | Condition |
+    |--------|-----------|
+    | `RISK_OFF` | DXY +0.15% and SPX −0.10% |
+    | `RISK_ON` | DXY −0.15% and SPX +0.10% |
+    | `TRANSITION` | Mixed or insufficient data |
+
+    **Fire vs. veto:** `dxy_veto_triggered = True` sets `signal_valid = False` and contributes `score = 0.0` to fusion. The Macro Gate veto is the most common non-topological veto. During Privileged Mode (central bank intervention), this veto must never be overridden.
+
+    <Warning>
+      Never override a λ₇ Macro Gate veto during Privileged Mode. Central bank interventions break normal DXY/EUR structural relationships and will generate false-positive signals.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="λ₈ Light-Cone Violation (Information Leakage)">
+    **File:** `lambda_sensors/light_cone_violation.py`
+
+    λ₈ detects when institutional information is leaking from lead assets (DXY, SPX) into the target asset before IPDA completes delivery. The signature is: DXY moves to an extreme stochastic z-score while the target asset remains neutral — a divergence that precedes a corrective delivery move.
+
+    **Detection mechanism:**
+
+    ```python
+    # light_cone_violation.py — momentum anomaly detection
+    if telemetry.dxy_extreme and telemetry.target_neutral:
+        telemetry.violation_detected = True
+        telemetry.violation_type = "MOMENTUM_ANOMALY"
+        telemetry.violation_severity = min(1.0, (abs(dxy_z) - 2.0) / 2.0)
+
+        # Kill switch for severe violations
+        if telemetry.violation_severity > 0.7:
+            telemetry.kill_switch_triggered = True
+    ```
+
+    **Stochastic z-score thresholds:**
+
+    | Field | Threshold | Meaning |
+    |-------|-----------|---------|
+    | `dxy_extreme` | `abs(z) > 2.0` (sigma) | DXY at statistical extreme |
+    | `target_neutral` | `abs(z) < 0.5` | Target not yet reacting |
+    | Kill-switch | `severity > 0.7` | Hard stop, `KILL_SWITCH_TRIGGERED` |
+
+    **Fire vs. veto:** Below severity 0.7, λ₈ enters monitoring mode (`score = 0.3`) without halting execution. Above 0.7, `kill_switch_triggered = True` halts all execution. The error code `VETO_LIAR_STATE` may appear in `veto.log` alongside `λ8` kill-switch events.
+
+    <Warning>
+      If λ₈ triggers repeatedly, audit for information leakage or front-running activity in the data feed. Alternatively, the Adelic Tube radius may be too narrow — review the p-adic radius setting in `core/adelic/`.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## Lambda Fusion Engine
+
+All eight sensors feed into the **Lambda Fusion Engine** (`core/kernel/lambda_fusion_engine.py`), which aggregates their scores into a single fused signal and issues a final trade permission.
+
+```
+λ₁ score ──┐
+λ₂ score ──┤
+λ₃ score ──┤
+λ₄ score ──┼──► p_fused = Σ(wᵢ × scoreᵢ) / Σwᵢ ──► trade_allowed
+λ₅ score ──┤
+λ₆ score ──┤
+λ₇ score ──┤
+λ₈ score ──┘
+```
+
+**Fusion rules:**
+
+1. If any sensor emits a hard veto, `trade_allowed = False` regardless of `p_fused`.
+2. If `p_fused < 0.2`, the `CONF:INSUFFICIENT` Ring 0 veto fires.
+3. The Mandra Gate then applies a final entropy check (ΔE ≥ 0.02) before execution.
+
+The veto decision is written to `r['veto']['trade_allowed']` in the `step()` result dict and to `logs/veto.log` on every bar.
+
+<Info>
+Sensor weights are configurable via the `/api/config/modules` endpoint. Disabling a sensor sets its weight to zero but does not skip its computation — the pipeline always runs all sensors for telemetry purposes.
+</Info>
+
+<CardGroup cols={2}>
+  <Card title="IPDA Structural Compiler" icon="layer-group" href="/modules/ipda-structural-compiler">
+    Layer 1 context that sensors consume
+  </Card>
+  <Card title="Ring 0 veto" icon="shield-halved" href="/modules/ring-0-veto">
+    Hard-stop guards downstream of the fusion engine
+  </Card>
+</CardGroup>
